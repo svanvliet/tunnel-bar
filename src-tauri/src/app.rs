@@ -380,7 +380,7 @@ impl AppState {
 
     pub async fn connect(self: &Arc<Self>, id: &str) -> Result<(), String> {
         if let Some(pid) = self.external_pid(id) {
-            return Err(format!("Already connected outside TunnelBar (PID {pid}). Use “Take over” to manage it."));
+            return Err(format!("Already connected outside Tunnel Bar (PID {pid}). Use “Take over” to manage it."));
         }
         let cli = self.cli_path().await.ok_or("devtunnel CLI not found")?;
         self.supervisor.connect(id, cli);
@@ -412,7 +412,7 @@ impl AppState {
 
     pub async fn host(self: &Arc<Self>, id: &str) -> Result<(), String> {
         if let Some(pid) = self.external_host_pid(id) {
-            return Err(format!("Already hosted outside TunnelBar (PID {pid})."));
+            return Err(format!("Already hosted outside Tunnel Bar (PID {pid})."));
         }
         if self.hosted_elsewhere(id) {
             return Err("This tunnel is already hosted by another machine. Hosting it here too would split its traffic.".into());
@@ -432,7 +432,7 @@ impl AppState {
         });
     }
 
-    /// Creates a TunnelBar-labelled tunnel for localhost:port and starts hosting it.
+    /// Creates a Tunnel Bar-labelled tunnel for localhost:port and starts hosting it.
     pub async fn expose(self: &Arc<Self>, port: u16, protocol: &str, anonymous: bool) -> Result<String, String> {
         if port == 0 {
             return Err("Enter a port between 1 and 65535.".into());
@@ -441,7 +441,7 @@ impl AppState {
             return Err(format!("Unsupported protocol {protocol}"));
         }
         let cli = self.cli_path().await.ok_or("devtunnel CLI not found")?;
-        let id = cli::create(&cli, &[APP_LABEL], &format!("localhost:{port} exposed by TunnelBar")).await?;
+        let id = cli::create(&cli, &[APP_LABEL], &format!("localhost:{port} exposed by Tunnel Bar")).await?;
         self.logs.push(&id, "app", &format!("Created tunnel for localhost:{port} ({protocol})"));
         let setup = async {
             cli::port_create(&cli, &id, port, protocol).await?;
@@ -499,7 +499,7 @@ impl AppState {
         Ok(())
     }
 
-    /// Deletes a tunnel TunnelBar created (refuses others to avoid destroying dev box tunnels).
+    /// Deletes a tunnel Tunnel Bar created (refuses others to avoid destroying dev box tunnels).
     pub async fn delete_tunnel(self: &Arc<Self>, id: &str) -> Result<(), String> {
         let ours = self
             .cache
@@ -509,7 +509,7 @@ impl AppState {
             .iter()
             .any(|s| s.tunnel_id == id && s.labels.iter().any(|l| l == APP_LABEL));
         if !ours {
-            return Err("Only tunnels created by TunnelBar can be deleted here.".into());
+            return Err("Only tunnels created by Tunnel Bar can be deleted here.".into());
         }
         let cli = self.cli_path().await.ok_or("devtunnel CLI not found")?;
         self.hoster.disconnect(id);
@@ -621,10 +621,10 @@ pub fn start_background(state: Shared) {
         .await
         .unwrap_or_default();
         for id in &reclaimed {
-            state.logs.push(id, "app", "Reclaimed connection left running by a previous TunnelBar instance");
+            state.logs.push(id, "app", "Reclaimed connection left running by a previous Tunnel Bar instance");
         }
         for id in &reclaimed_hosts {
-            state.logs.push(id, "app", "Reclaimed host left running by a previous TunnelBar instance");
+            state.logs.push(id, "app", "Reclaimed host left running by a previous Tunnel Bar instance");
         }
         // Restart reclaimed hosts before refreshing so the stale host count isn't mistaken for another machine.
         if !reclaimed_hosts.is_empty()

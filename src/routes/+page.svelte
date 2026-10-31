@@ -161,7 +161,7 @@
   {#if view === "list"}
     <header>
       <div class="title">
-        <strong>TunnelBar</strong>
+        <strong>Tunnel Bar</strong>
         {#if snap?.auth}
           <span class="sub" class:bad={!snap.auth.loggedIn} title={snap.auth.message}>
             {snap.auth.loggedIn ? snap.auth.message.replace(/^Logged in as /, "").replace(/ using .*$/, "").replace(/\.$/, "") : "Not signed in"}
@@ -330,14 +330,14 @@
             {/if}
             <span class="spacer"></span>
             {#if t.createdByApp || hostOn(t)}
-              <label class="toggle" title="Host automatically when TunnelBar starts">
+              <label class="toggle" title="Host automatically when Tunnel Bar starts">
                 <input type="checkbox" checked={t.settings.autoHost}
                   onchange={(e) => saveTunnel(t, { autoHost: e.currentTarget.checked })} />
                 {t.createdByApp ? "Auto" : "Auto-host"}
               </label>
             {/if}
             {#if !t.createdByApp}
-              <label class="toggle" title="Connect automatically when TunnelBar starts">
+              <label class="toggle" title="Connect automatically when Tunnel Bar starts">
                 <input type="checkbox" checked={t.settings.autoConnect}
                   onchange={(e) => saveTunnel(t, { autoConnect: e.currentTarget.checked })} />
                 Auto
@@ -392,7 +392,7 @@
         <!-- svelte-ignore a11y_autofocus -->
         <input bind:value={exposePort} autofocus inputmode="numeric" placeholder="3000"
           onkeydown={(e) => { if (e.key === "Enter") submitExpose(); }} />
-        <div class="hint">TunnelBar creates a tunnel labelled “tunnelbar”, adds this port, and hosts it from this Mac.</div>
+        <div class="hint">Tunnel Bar creates a tunnel labelled “tunnelbar”, adds this port, and hosts it from this Mac.</div>
       </div>
       <div class="field">
         <span>Protocol</span>
@@ -454,9 +454,9 @@
         </div>
       </section>
       <footer>
-        <span>TunnelBar {appVersion}</span>
+        <span>Tunnel Bar {appVersion}</span>
         <span class="spacer"></span>
-        <button class="danger" onclick={() => call("quit")}>Quit TunnelBar</button>
+        <button class="danger" onclick={() => call("quit")}>Quit Tunnel Bar</button>
       </footer>
     {/if}
   {/if}

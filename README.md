@@ -1,4 +1,4 @@
-# TunnelBar
+# Tunnel Bar
 
 A macOS menu-bar app for managing [Microsoft Dev Tunnels](https://learn.microsoft.com/azure/developer/dev-tunnels/): connect to tunnels and host your own. It wraps the `devtunnel` CLI, so it uses your existing CLI sign-in.
 
@@ -9,7 +9,7 @@ A macOS menu-bar app for managing [Microsoft Dev Tunnels](https://learn.microsof
 - Lists every tunnel on your account, with host online/offline status.
 - Connect and disconnect, with auto-reconnect using exponential backoff. Stops retrying on auth errors.
 - Per-tunnel **Auto** connect on launch; launch at login.
-- Detects `devtunnel connect` processes started outside TunnelBar, with **Take over** and **Stop**.
+- Detects `devtunnel connect` processes started outside Tunnel Bar, with **Take over** and **Stop**.
 - Shows forwarded ports (`localhost:L → :R`), with Copy SSH (uses your `~/.ssh/config` alias if one matches) and Open SSH (Terminal).
 - Per-tunnel live logs, saved to `~/Library/Logs/TunnelBar/`.
 - Notifications on unexpected drops and reconnects.
@@ -22,7 +22,7 @@ A macOS menu-bar app for managing [Microsoft Dev Tunnels](https://learn.microsof
 - **Host here** / **Stop hosting** for your own tunnels, with optional **Auto-host** on launch and auto-restart.
 - Shows each hosted port's public URL (open/copy) and Inspect link, and warns when nothing is listening locally.
 - Access control: private (your account) by default; **Make public…** adds anonymous access after confirmation; **Require sign-in** removes it.
-- Delete tunnels that TunnelBar created. Tunnels hosted by another machine (e.g. a dev box) are never hosted or deleted from here.
+- Delete tunnels that Tunnel Bar created. Tunnels hosted by another machine (e.g. a dev box) are never hosted or deleted from here.
 
 ## Requirements
 
@@ -31,10 +31,10 @@ A macOS menu-bar app for managing [Microsoft Dev Tunnels](https://learn.microsof
 
 ## Install
 
-Download the DMG from [Releases](https://github.com/svanvliet/tunnel-bar/releases) and drag TunnelBar to Applications. Builds are ad-hoc signed (not notarized yet), so clear the quarantine flag before first launch:
+Download the DMG from [Releases](https://github.com/svanvliet/tunnel-bar/releases) and drag Tunnel Bar to Applications. Builds are ad-hoc signed (not notarized yet), so clear the quarantine flag before first launch:
 
 ```sh
-xattr -dr com.apple.quarantine /Applications/TunnelBar.app
+xattr -dr com.apple.quarantine "/Applications/Tunnel Bar.app"
 ```
 
 ## Build
@@ -43,7 +43,7 @@ xattr -dr com.apple.quarantine /Applications/TunnelBar.app
 npm ci
 npm run tauri dev     # development
 npm run tauri build   # release .app in src-tauri/target/release/bundle/macos
-codesign --force --deep -s - src-tauri/target/release/bundle/macos/TunnelBar.app   # ad-hoc sign
+codesign --force --deep -s - src-tauri/target/release/"bundle/macos/Tunnel Bar.app"   # ad-hoc sign
 ./scripts/package-macos.sh   # universal DMG + zip in dist/
 ```
 

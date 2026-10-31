@@ -113,7 +113,7 @@ impl ConnState {
 pub struct TunnelSettings {
     pub nickname: Option<String>,
     pub auto_connect: bool,
-    /// Host this tunnel when TunnelBar starts.
+    /// Host this tunnel when Tunnel Bar starts.
     pub auto_host: bool,
     /// ~/.ssh/config Host alias to use for "Open SSH" (port is overridden with -p).
     pub ssh_host: Option<String>,
@@ -164,7 +164,7 @@ pub struct TunnelView {
     /// Ports published by our `devtunnel host`, with public URLs.
     pub hosted_ports: Vec<HostedPort>,
     pub anonymous: bool,
-    /// Created by TunnelBar's "Expose local port" (label `tunnelbar`).
+    /// Created by Tunnel Bar's "Expose local port" (label `tunnelbar`).
     pub created_by_app: bool,
     /// A host other than this app's is connected to the relay.
     pub hosted_elsewhere: bool,

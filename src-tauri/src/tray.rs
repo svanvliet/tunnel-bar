@@ -16,11 +16,11 @@ fn image(state: TrayState) -> Image<'static> {
 }
 
 pub fn create(app: &AppHandle) -> tauri::Result<()> {
-    let menu = Menu::with_items(app, &[&MenuItem::with_id(app, "open", "Open TunnelBar…", true, None::<&str>)?])?;
+    let menu = Menu::with_items(app, &[&MenuItem::with_id(app, "open", "Open Tunnel Bar…", true, None::<&str>)?])?;
     TrayIconBuilder::with_id(TRAY_ID)
         .icon(image(TrayState::Idle))
         .icon_as_template(true)
-        .tooltip("TunnelBar")
+        .tooltip("Tunnel Bar")
         .menu(&menu)
         .show_menu_on_left_click(false)
         .on_tray_icon_event(|tray, event| {
@@ -65,7 +65,7 @@ pub fn update(app: &AppHandle, snap: &Snapshot) {
     }
     if last.as_ref().map(|(_, m)| m.as_str()) != Some(sig.as_str()) {
         let up = snap.tunnels.iter().filter(|t| t.state.is_up()).count();
-        let _ = tray.set_tooltip(Some(format!("TunnelBar — {up} of {} connected", snap.tunnels.len())));
+        let _ = tray.set_tooltip(Some(format!("Tunnel Bar — {up} of {} connected", snap.tunnels.len())));
         if let Ok(menu) = build_menu(app, snap) {
             let _ = tray.set_menu(Some(menu));
         }
@@ -99,7 +99,7 @@ fn build_menu<R: Runtime>(app: &AppHandle<R>, snap: &Snapshot) -> tauri::Result<
             if ports.is_empty() { String::new() } else { format!("  {ports}") }
         );
         let enabled = !matches!(t.state, ConnState::External { .. });
-        // Tunnels TunnelBar exposed are for hosting; clicking toggles the host instead of a client connection.
+        // Tunnels Tunnel Bar exposed are for hosting; clicking toggles the host instead of a client connection.
         let (action, enabled) = if t.created_by_app {
             ("hosttoggle", !matches!(t.host_state, ConnState::External { .. }))
         } else {
@@ -108,10 +108,10 @@ fn build_menu<R: Runtime>(app: &AppHandle<R>, snap: &Snapshot) -> tauri::Result<
         menu.append(&MenuItem::with_id(app, format!("{action}:{}", t.id), label, enabled, None::<&str>)?)?;
     }
     menu.append(&PredefinedMenuItem::separator(app)?)?;
-    menu.append(&MenuItem::with_id(app, "open", "Open TunnelBar…", true, None::<&str>)?)?;
+    menu.append(&MenuItem::with_id(app, "open", "Open Tunnel Bar…", true, None::<&str>)?)?;
     menu.append(&MenuItem::with_id(app, "refresh", "Refresh", true, None::<&str>)?)?;
     menu.append(&PredefinedMenuItem::separator(app)?)?;
-    menu.append(&MenuItem::with_id(app, "quit", "Quit TunnelBar", true, Some("CmdOrCtrl+Q"))?)?;
+    menu.append(&MenuItem::with_id(app, "quit", "Quit Tunnel Bar", true, Some("CmdOrCtrl+Q"))?)?;
     Ok(menu)
 }
 

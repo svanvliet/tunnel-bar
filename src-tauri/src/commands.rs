@@ -56,7 +56,7 @@ pub async fn stop_external(state: State<'_, Shared>, id: String) -> Result<(), S
     state.inner().clone().stop_external(&id).await
 }
 
-/// Stops an external connection and reconnects it under TunnelBar's management.
+/// Stops an external connection and reconnects it under Tunnel Bar's management.
 #[tauri::command]
 pub async fn adopt_external(state: State<'_, Shared>, id: String) -> Result<(), String> {
     let s = state.inner().clone();

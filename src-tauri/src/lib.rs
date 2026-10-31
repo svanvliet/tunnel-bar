@@ -41,10 +41,16 @@ pub fn run() {
             }
             let launch = state.settings.lock().unwrap().launch_at_login;
             // Only reconcile autostart in release builds so `tauri dev` doesn't register the debug binary.
-            if !cfg!(debug_assertions)
-                && let Err(e) = commands::apply_autostart(app.handle(), launch) {
+            if !cfg!(debug_assertions) {
+                // Pre-0.3 builds were named "TunnelBar"; drop their login item, which points at the old bundle.
+                #[cfg(target_os = "macos")]
+                if let Some(home) = dirs::home_dir() {
+                    let _ = std::fs::remove_file(home.join("Library/LaunchAgents/TunnelBar.plist"));
+                }
+                if let Err(e) = commands::apply_autostart(app.handle(), launch) {
                     state.logs.push("_app", "app", &format!("autostart: {e}"));
                 }
+            }
 
             if let Some(w) = app.get_webview_window("main") {
                 let w2 = w.clone();
