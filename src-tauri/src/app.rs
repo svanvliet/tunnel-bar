@@ -453,6 +453,7 @@ impl AppState {
             found.extend(a.host);
             unexplained = a.unexplained;
         }
+        external::exclusive_roles(&mut found);
         let notice_changed = std::mem::replace(&mut *self.admin_devtunnel.lock().unwrap(), unexplained) != unexplained;
         let with_ports: Vec<(ExternalConn, Vec<u16>)> =
             found.into_iter().map(|e| { let p = external::listen_ports(e.pid); (e, p) }).collect();

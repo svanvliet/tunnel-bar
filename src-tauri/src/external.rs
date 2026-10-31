@@ -73,6 +73,13 @@ pub struct ScanResult {
     pub opaque: Vec<u32>,
 }
 
+/// A process hosting a tunnel is never also its client, even when it listens on a port
+/// (the host's local server) or was attributed rather than parsed.
+pub fn exclusive_roles(found: &mut Vec<ExternalConn>) {
+    let hosts: Vec<u32> = found.iter().filter(|e| e.role == Role::Host).map(|e| e.pid).collect();
+    found.retain(|e| e.role == Role::Host || !hosts.contains(&e.pid));
+}
+
 pub fn scan_all(exclude_pids: &[u32]) -> ScanResult {
     let Ok(mut sys) = System::new() else { return ScanResult::default() };
     sys.refresh_processes_specifics(
@@ -291,5 +298,18 @@ mod tests {
         let mixed = attribute_opaque(&[(42, true), (43, false)], &ids(&["a.usw3"]));
         assert_eq!(mixed.host.map(|h| h.pid), Some(43));
         assert!(mixed.unexplained);
+    }
+
+    #[test]
+    fn a_host_process_is_never_also_a_client() {
+        let conn = |pid, role, t: &str| ExternalConn { pid, role, tunnel_arg: t.into() };
+        // pid 7 hosts svv; a parse or attribution that also lists it as a client must not survive.
+        let mut found = vec![conn(7, Role::Connect, "svv"), conn(9, Role::Connect, "other"), conn(7, Role::Host, "svv")];
+        exclusive_roles(&mut found);
+        assert_eq!(found, vec![conn(9, Role::Connect, "other"), conn(7, Role::Host, "svv")]);
+        // A separate client of the same tunnel on this machine stays.
+        let mut found = vec![conn(7, Role::Host, "svv"), conn(8, Role::Connect, "svv")];
+        exclusive_roles(&mut found);
+        assert_eq!(found.len(), 2);
     }
 }

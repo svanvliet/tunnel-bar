@@ -13,7 +13,7 @@ A macOS menu-bar and Windows tray app for managing [Microsoft Dev Tunnels](https
 - Browse your account's tunnels in **Remote connections** and **Local tunnels**, with host online/offline status.
 - Connect and disconnect, with auto-reconnect using exponential backoff. Stops retrying on auth errors.
 - Per-tunnel **Auto** connect on launch.
-- Detects `devtunnel connect` processes started outside Tunnel Bar, with **Take over** and **Stop**.
+- Detects `devtunnel connect` and `devtunnel host` processes started outside Tunnel Bar, with **Take over** and **Stop**. An external host shows on its **Local tunnels** card only; its Remote card stays a normal connect target. On Windows, a `devtunnel host` started from an admin terminal is still recognised. Stopping it asks for administrator approval (UAC).
 - Shows forwarded ports (`localhost:L → :R`), with Copy SSH (uses your `~/.ssh/config` alias if one matches) and Open SSH (Terminal on macOS, Windows Terminal or cmd on Windows).
 - Optional local nicknames (double-click a tunnel name or open its details).
 - Never orphans connections: stops children on Quit/SIGTERM, and reclaims any left by a crash on next launch. On Windows each child runs in a Job Object, so it dies with Tunnel Bar.
