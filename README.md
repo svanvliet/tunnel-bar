@@ -42,8 +42,7 @@ A macOS menu-bar and Windows tray app for managing [Microsoft Dev Tunnels](https
 
 ### Management
 
-- Create tunnels with an id, description, labels, an expiration (1h–30d), ports, public access and hosting. Tunnel Bar always adds the `tunnelbar` label.
-- Edit labels, description and expiration. Shows each tunnel's lifetime.
+- Use **Manage** after creation to edit a tunnel's description, labels and expiration (1h–30d), and view its lifetime.
 - Add and remove ports. Tunnel Bar restarts its host so the change takes effect.
 - Access rules beyond public: your Entra tenant, a GitHub organization (needs a GitHub sign-in) or a repository, as allow or deny rules with an optional expiration, on the tunnel or a single port. Changing rules on a tunnel Tunnel Bar didn't create needs confirmation.
 - Host/Origin header rewriting per tunnel or port, including `unchanged` for dev servers like Vite and Next.js.
@@ -65,7 +64,7 @@ See [docs/phase3-ui-hooks.md](docs/phase3-ui-hooks.md) for the commands and fiel
 ### Settings and sign-in
 
 - Launch at login and notifications on unexpected drops and reconnects.
-- Configure or disable the global popover hotkey (default ⌘⌥⇧T), and filter tunnels by label without stopping connections.
+- Configure or disable the global popover hotkey (default ⌘⌥⇧T on macOS; Ctrl+Alt+Shift+T on Windows), and filter tunnels by label without stopping connections.
 - Auto-detect the `devtunnel` CLI or set its path. Sign in with Microsoft or GitHub using a browser or device code; sign out after inline confirmation.
 - Settings live in `~/Library/Application Support/me.svv.tunnelbar/` (`%APPDATA%\me.svv.tunnelbar` on Windows).
 
