@@ -15,6 +15,7 @@
   let exposePort = $state("");
   let exposeProtocol = $state("http");
   let exposeAnon = $state(false);
+  let exposeName = $state("");
   let logId = $state<string | null>(null);
   let logs = $state<LogLine[]>([]);
   let follow = $state(true);
@@ -119,7 +120,7 @@
   }
 
   function openExpose() {
-    exposePort = ""; exposeProtocol = "http"; exposeAnon = false;
+    exposePort = ""; exposeProtocol = "http"; exposeAnon = false; exposeName = "";
     view = "expose";
   }
 
@@ -127,7 +128,7 @@
     const port = Number(exposePort);
     if (!Number.isInteger(port) || port < 1 || port > 65535) { error = "Enter a port between 1 and 65535."; return; }
     await withBusy("expose", async () => {
-      const id = await call<string>("expose_port", { port, protocol: exposeProtocol, anonymous: exposeAnon });
+      const id = await call<string>("expose_port", { port, protocol: exposeProtocol, anonymous: exposeAnon, name: exposeName.trim() || null });
       if (id) { view = "list"; flash(`Exposing localhost:${port}…`); }
     });
   }
@@ -395,6 +396,13 @@
         <div class="hint">Tunnel Bar creates a tunnel labelled “tunnelbar”, adds this port, and hosts it from this Mac.</div>
       </div>
       <div class="field">
+        <span>Tunnel name <span class="optional">(optional)</span></span>
+        <input bind:value={exposeName} placeholder="Random if empty" autocapitalize="off" spellcheck="false"
+          oninput={() => (exposeName = exposeName.toLowerCase())}
+          onkeydown={(e) => { if (e.key === "Enter") submitExpose(); }} />
+        <div class="hint">3–49 lowercase letters, digits or hyphens. Becomes the tunnel ID, e.g. <code>{exposeName.trim() || "my-app"}</code>.</div>
+      </div>
+      <div class="field">
         <span>Protocol</span>
         <select bind:value={exposeProtocol}>
           <option value="http">HTTP</option>
@@ -539,6 +547,7 @@
   .field { display: flex; flex-direction: column; gap: 4px; padding-top: 8px; border-top: 1px solid var(--line); }
   .field > span { font-weight: 600; }
   .field input { font: inherit; padding: 4px 6px; border-radius: 5px; border: 1px solid var(--line); background: var(--card); color: var(--fg); }
+  .optional { font-weight: 400; opacity: 0.6; }
   .hint { font-size: 11px; color: var(--mute); word-break: break-all; -webkit-user-select: text; user-select: text; }
   .logs { flex: 1; overflow-y: auto; padding: 8px 10px; font: 11px/1.45 ui-monospace, Menlo, monospace; -webkit-user-select: text; user-select: text; background: var(--card); }
   .line { white-space: pre-wrap; word-break: break-word; }

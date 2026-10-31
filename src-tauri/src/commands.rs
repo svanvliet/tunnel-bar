@@ -37,8 +37,8 @@ pub fn stop_host(state: State<'_, Shared>, id: String) {
 }
 
 #[tauri::command]
-pub async fn expose_port(state: State<'_, Shared>, port: u16, protocol: String, anonymous: bool) -> Result<String, String> {
-    state.inner().clone().expose(port, &protocol, anonymous).await
+pub async fn expose_port(state: State<'_, Shared>, port: u16, protocol: String, anonymous: bool, name: Option<String>) -> Result<String, String> {
+    state.inner().clone().expose(port, &protocol, anonymous, name.as_deref()).await
 }
 
 #[tauri::command]

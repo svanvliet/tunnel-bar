@@ -433,15 +433,19 @@ impl AppState {
     }
 
     /// Creates a Tunnel Bar-labelled tunnel for localhost:port and starts hosting it.
-    pub async fn expose(self: &Arc<Self>, port: u16, protocol: &str, anonymous: bool) -> Result<String, String> {
+    pub async fn expose(self: &Arc<Self>, port: u16, protocol: &str, anonymous: bool, name: Option<&str>) -> Result<String, String> {
         if port == 0 {
             return Err("Enter a port between 1 and 65535.".into());
         }
         if !matches!(protocol, "http" | "https" | "auto") {
             return Err(format!("Unsupported protocol {protocol}"));
         }
+        let name = name.map(str::trim).filter(|n| !n.is_empty());
+        if let Some(n) = name {
+            cli::validate_tunnel_id(n)?;
+        }
         let cli = self.cli_path().await.ok_or("devtunnel CLI not found")?;
-        let id = cli::create(&cli, &[APP_LABEL], &format!("localhost:{port} exposed by Tunnel Bar")).await?;
+        let id = cli::create(&cli, name, &[APP_LABEL], &format!("localhost:{port} exposed by Tunnel Bar")).await?;
         self.logs.push(&id, "app", &format!("Created tunnel for localhost:{port} ({protocol})"));
         let setup = async {
             cli::port_create(&cli, &id, port, protocol).await?;

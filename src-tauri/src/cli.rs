@@ -180,12 +180,28 @@ pub fn parse_create(stdout: &str) -> Result<String, String> {
 }
 
 /// Creates a tunnel with a CLI-generated id; returns "name.cluster".
-pub async fn create(cli: &Path, labels: &[&str], description: &str) -> Result<String, String> {
-    let mut args = vec!["create", "-j", "-d", description];
+pub async fn create(cli: &Path, id: Option<&str>, labels: &[&str], description: &str) -> Result<String, String> {
+    let mut args = vec!["create"];
+    args.extend(id);
+    args.extend(["-j", "-d", description]);
     for l in labels {
         args.extend(["-l", l]);
     }
     parse_create(&ok(cli, &args).await?)
+}
+
+/// Mirrors the service's rule for requested tunnel IDs (TunnelConstraints.NewTunnelIdPattern).
+pub fn validate_tunnel_id(id: &str) -> Result<(), String> {
+    let b = id.as_bytes();
+    let ok = (3..=49).contains(&b.len())
+        && b.iter().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || *c == b'-')
+        && b[0] != b'-'
+        && b[b.len() - 1] != b'-';
+    if ok {
+        Ok(())
+    } else {
+        Err("Names must be 3–49 lowercase letters, digits or hyphens, and can't start or end with a hyphen.".into())
+    }
 }
 
 pub async fn port_create(cli: &Path, id: &str, port: u16, protocol: &str) -> Result<(), String> {
@@ -227,6 +243,16 @@ pub async fn set_anonymous(cli: &Path, id: &str, allow: bool) -> Result<(), Stri
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn validates_tunnel_ids() {
+        for ok in ["abc", "my-app-1", &"a".repeat(49)] {
+            assert!(validate_tunnel_id(ok).is_ok(), "{ok}");
+        }
+        for bad in ["ab", "-abc", "abc-", "My-App", "a_b", "a.b", &"a".repeat(50)] {
+            assert!(validate_tunnel_id(bad).is_err(), "{bad}");
+        }
+    }
 
     #[test]
     fn parses_create_and_access() {
