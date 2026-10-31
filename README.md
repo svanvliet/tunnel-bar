@@ -12,11 +12,20 @@ A macOS menu-bar app for managing [Microsoft Dev Tunnels](https://learn.microsof
 - Per-tunnel live logs, saved to `~/Library/Logs/TunnelBar/`.
 - Notifications on unexpected drops and reconnects.
 - Optional local nicknames (double-click a tunnel name).
+- Never orphans connections: stops children on Quit/SIGTERM, and reclaims any left by a crash on next launch.
 
 ## Requirements
 
 - macOS 11+
 - `devtunnel` CLI (`brew install --cask devtunnel`), signed in with `devtunnel user login`
+
+## Install
+
+Download the DMG from [Releases](https://github.com/svanvliet/tunnel-bar/releases) and drag TunnelBar to Applications. Builds are ad-hoc signed (not notarized yet), so clear the quarantine flag before first launch:
+
+```sh
+xattr -dr com.apple.quarantine /Applications/TunnelBar.app
+```
 
 ## Build
 
@@ -25,6 +34,7 @@ npm ci
 npm run tauri dev     # development
 npm run tauri build   # release .app in src-tauri/target/release/bundle/macos
 codesign --force --deep -s - src-tauri/target/release/bundle/macos/TunnelBar.app   # ad-hoc sign
+./scripts/package-macos.sh   # universal DMG + zip in dist/
 ```
 
 ## Test

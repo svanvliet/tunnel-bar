@@ -51,7 +51,7 @@ impl AppState {
             });
             AppState {
                 app: app.clone(),
-                supervisor: Supervisor::new(logs.clone(), listener),
+                supervisor: Supervisor::new(logs.clone(), listener).with_pidfile(settings::pidfile_path()),
                 logs,
                 settings: Mutex::new(settings::load()),
                 cache: Mutex::new(Cache::default()),
@@ -352,7 +352,18 @@ impl AppState {
 /// Periodic work: external scan (10s), account refresh (60s), sleep/wake detection.
 pub fn start_background(state: Shared) {
     tauri::async_runtime::spawn(async move {
+        let reclaimed = tokio::task::spawn_blocking(|| crate::supervisor::reclaim_orphans(&settings::pidfile_path()))
+            .await
+            .unwrap_or_default();
+        for id in &reclaimed {
+            state.logs.push(id, "app", "Reclaimed connection left running by a previous TunnelBar instance");
+        }
         state.refresh().await;
+        for id in reclaimed {
+            if !state.supervisor.is_active(&id) {
+                let _ = state.connect(&id).await;
+            }
+        }
         state.auto_connect().await;
         let mut last_wall = chrono::Local::now();
         let mut ticks: u64 = 0;

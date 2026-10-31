@@ -27,7 +27,7 @@ tauri-plugin-notification = "2.8.0"
 tauri-plugin-clipboard-manager = "2.5.0"
 tauri-plugin-single-instance = "2.5.5"
 tauri-plugin-positioner = { version = "2.4.0", features = ["tray-icon"] }
-tokio = { version = "1.54.1", features = ["process", "io-util", "time", "sync", "macros", "rt-multi-thread"] }
+tokio = { version = "1.54.1", features = ["process", "io-util", "time", "sync", "macros", "rt-multi-thread", "signal"] }
 regex = "1.13.1"
 once_cell = "1.21.4"
 sysinfo = "0.40.1"

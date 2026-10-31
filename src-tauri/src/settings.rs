@@ -15,6 +15,10 @@ pub fn log_dir() -> PathBuf {
     dirs::data_local_dir().unwrap_or_else(std::env::temp_dir).join("TunnelBar").join("logs")
 }
 
+pub fn pidfile_path() -> PathBuf {
+    config_dir().join("children.json")
+}
+
 fn settings_path() -> PathBuf {
     config_dir().join("settings.json")
 }

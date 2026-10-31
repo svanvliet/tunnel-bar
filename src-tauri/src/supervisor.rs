@@ -3,7 +3,7 @@
 use crate::logs::LogStore;
 use crate::model::{ConnState, Forward};
 use crate::parser::{parse_line, CliEvent};
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::PathBuf;
 use std::process::Stdio;
 use std::sync::{Arc, Mutex};
@@ -52,6 +52,8 @@ pub struct Supervisor {
     inner: Arc<Mutex<HashMap<String, Managed>>>,
     logs: Arc<LogStore>,
     listener: Listener,
+    /// Records managed child PIDs so orphans can be reclaimed if the app dies without cleanup.
+    pidfile: Option<Arc<PathBuf>>,
 }
 
 pub fn backoff_secs(attempt: u32) -> u64 {
@@ -66,7 +68,22 @@ enum RunEnd {
 
 impl Supervisor {
     pub fn new(logs: Arc<LogStore>, listener: Listener) -> Self {
-        Self { inner: Arc::new(Mutex::new(HashMap::new())), logs, listener }
+        Self { inner: Arc::new(Mutex::new(HashMap::new())), logs, listener, pidfile: None }
+    }
+
+    pub fn with_pidfile(mut self, path: PathBuf) -> Self {
+        self.pidfile = Some(Arc::new(path));
+        self
+    }
+
+    fn persist_pids(&self) {
+        let Some(path) = &self.pidfile else { return };
+        let map: BTreeMap<String, u32> =
+            self.inner.lock().unwrap().iter().filter_map(|(k, m)| m.pid.map(|p| (k.clone(), p))).collect();
+        if let Some(dir) = path.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        let _ = std::fs::write(path.as_ref(), serde_json::to_vec(&map).unwrap_or_default());
     }
 
     pub fn state(&self, id: &str) -> (ConnState, Vec<Forward>) {
@@ -212,6 +229,9 @@ impl Supervisor {
                 _ => false,
             }
         };
+        if current {
+            self.persist_pids();
+        }
         if current && set_disconnected {
             self.log(id, "app", "Disconnected");
             self.set_state(id, Some(generation), ConnState::Disconnected);
@@ -240,6 +260,7 @@ impl Supervisor {
                 e.pid = pid;
             }
         }
+        self.persist_pids();
         let mut out = BufReader::new(child.stdout.take().unwrap()).lines();
         let mut err = BufReader::new(child.stderr.take().unwrap()).lines();
         let (mut out_done, mut err_done) = (false, false);
@@ -347,7 +368,48 @@ impl Supervisor {
         for &pid in pids.iter().filter(|&&p| alive(p)) {
             signal_group(pid, true);
         }
+        self.inner.lock().unwrap().values_mut().for_each(|e| e.pid = None);
+        self.persist_pids();
     }
+}
+
+/// Stops `devtunnel connect` children left behind by a previous instance that died without cleanup
+/// (SIGKILL, crash). Returns the tunnel ids so they can be reconnected under management.
+pub fn reclaim_orphans(pidfile: &std::path::Path) -> Vec<String> {
+    let mut running: Option<Vec<crate::external::ExternalConn>> = None;
+    reclaim_orphans_with(pidfile, |pid, id| {
+        // Only signal PIDs that are still a `devtunnel connect` for the recorded tunnel (PIDs get reused).
+        running
+            .get_or_insert_with(|| crate::external::scan(&[]))
+            .iter()
+            .any(|c| c.pid == pid && crate::external::matches_tunnel(&c.tunnel_arg, id))
+    })
+}
+
+fn reclaim_orphans_with(pidfile: &std::path::Path, mut is_ours: impl FnMut(u32, &str) -> bool) -> Vec<String> {
+    let Some(map) = std::fs::read(pidfile).ok().and_then(|b| serde_json::from_slice::<BTreeMap<String, u32>>(&b).ok())
+    else {
+        return vec![];
+    };
+    let _ = std::fs::remove_file(pidfile);
+    if map.is_empty() {
+        return vec![];
+    }
+    let mut reclaimed = Vec::new();
+    for (id, pid) in map {
+        if alive(pid) && is_ours(pid, &id) {
+            signal_group(pid, false);
+            let deadline = std::time::Instant::now() + STOP_GRACE;
+            while std::time::Instant::now() < deadline && alive(pid) {
+                std::thread::sleep(Duration::from_millis(100));
+            }
+            if alive(pid) {
+                signal_group(pid, true);
+            }
+            reclaimed.push(id);
+        }
+    }
+    reclaimed
 }
 
 async fn terminate(child: &mut Child, pid: Option<u32>) {
@@ -527,6 +589,51 @@ mod tests {
     }
 
     #[cfg(unix)]
+    #[test]
+    fn pidfile_tracks_children_and_reclaims_orphans() {
+        let dir = tempfile::tempdir().unwrap();
+        let cli = fake_cli(dir.path(), "echo 'Connected to tunnel: t1'; sleep 30");
+        let pidfile = dir.path().join("children.json");
+        let (s, _) = sup(dir.path());
+        let s = s.with_pidfile(pidfile.clone());
+        s.connect("t1", cli);
+        wait_for(&s, "t1", |st| *st == ConnState::Connected);
+        let map: BTreeMap<String, u32> = serde_json::from_slice(&std::fs::read(&pidfile).unwrap()).unwrap();
+        let pid = map["t1"];
+        assert!(alive(pid));
+
+        // Simulate a hard crash: the supervisor never cleans up, so the child is orphaned.
+        let pre = std::fs::read(&pidfile).unwrap();
+        let ignored = reclaim_orphans_with(&pidfile, |_, _| false);
+        assert!(ignored.is_empty() && alive(pid), "a reused/foreign pid must not be signalled");
+        std::fs::write(&pidfile, &pre).unwrap();
+        let got = reclaim_orphans_with(&pidfile, |p, id| p == pid && id == "t1");
+        assert_eq!(got, vec!["t1".to_string()]);
+        for _ in 0..50 {
+            if !alive(pid) {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        assert!(!alive(pid));
+        assert!(!pidfile.exists());
+        s.shutdown();
+    }
+
+    #[test]
+    fn shutdown_clears_pidfile() {
+        let dir = tempfile::tempdir().unwrap();
+        let cli = fake_cli(dir.path(), "echo 'Connected to tunnel: t1'; sleep 30");
+        let pidfile = dir.path().join("children.json");
+        let (s, _) = sup(dir.path());
+        let s = s.with_pidfile(pidfile.clone());
+        s.connect("t1", cli);
+        wait_for(&s, "t1", |st| *st == ConnState::Connected);
+        s.shutdown();
+        let map: BTreeMap<String, u32> = serde_json::from_slice(&std::fs::read(&pidfile).unwrap()).unwrap();
+        assert!(map.is_empty());
+    }
+
     #[test]
     fn shutdown_kills_children() {
         let dir = tempfile::tempdir().unwrap();

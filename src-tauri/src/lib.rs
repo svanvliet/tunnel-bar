@@ -59,6 +59,25 @@ pub fn run() {
                     _ => {}
                 });
             }
+            #[cfg(unix)]
+            {
+                // Treat SIGTERM/SIGINT/SIGHUP like Quit so children are stopped instead of orphaned.
+                let h = app.handle().clone();
+                tauri::async_runtime::spawn(async move {
+                    use tokio::signal::unix::{signal, SignalKind};
+                    let (Ok(mut term), Ok(mut int), Ok(mut hup)) =
+                        (signal(SignalKind::terminate()), signal(SignalKind::interrupt()), signal(SignalKind::hangup()))
+                    else {
+                        return;
+                    };
+                    tokio::select! {
+                        _ = term.recv() => {}
+                        _ = int.recv() => {}
+                        _ = hup.recv() => {}
+                    }
+                    h.exit(0);
+                });
+            }
             app::start_background(state);
             Ok(())
         })
