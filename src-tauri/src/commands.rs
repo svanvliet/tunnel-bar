@@ -52,9 +52,10 @@ pub async fn expose_port(
     state.inner().clone().expose(port, &protocol, anonymous, name.as_deref(), headers, access_rules.unwrap_or_default()).await
 }
 
+/// Fails with `CONFIRM_REQUIRED: ` on tunnels Tunnel Bar didn't create until `confirm` is passed.
 #[tauri::command]
-pub async fn set_anonymous(state: State<'_, Shared>, id: String, allow: bool) -> Result<(), String> {
-    state.inner().clone().set_anonymous(&id, allow).await
+pub async fn set_anonymous(state: State<'_, Shared>, id: String, allow: bool, confirm: Option<bool>) -> Result<(), String> {
+    state.inner().clone().set_anonymous(&id, allow, confirm.unwrap_or(false)).await
 }
 
 /// Fails with a `CONFIRM_REQUIRED: ` / `HOSTED_ELSEWHERE: ` prefixed message until the matching flag is passed.
@@ -83,9 +84,10 @@ pub async fn update_tunnel(
     state: State<'_, Shared>,
     id: String,
     update: UpdateTunnelRequest,
+    confirm: Option<bool>,
     allow_hosted_elsewhere: Option<bool>,
 ) -> Result<(), String> {
-    state.inner().clone().update_tunnel(&id, update, allow_hosted_elsewhere.unwrap_or(false)).await
+    state.inner().clone().update_tunnel(&id, update, confirm.unwrap_or(false), allow_hosted_elsewhere.unwrap_or(false)).await
 }
 
 #[tauri::command]

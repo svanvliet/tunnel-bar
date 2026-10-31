@@ -12,7 +12,7 @@ use std::collections::HashMap;
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
-use tokio::net::{TcpListener, TcpStream};
+use tokio::net::{TcpListener, TcpSocket, TcpStream};
 
 /// Returns the local port `devtunnel connect` currently uses for (tunnel id, remote port).
 pub type Resolver = Arc<dyn Fn(&str, u16) -> Option<u16> + Send + Sync>;
@@ -89,7 +89,27 @@ impl Drop for Pins {
     }
 }
 
+/// macOS lets an SO_REUSEADDR socket (tokio's listener default) bind 127.0.0.1:L even while a server
+/// listens on 0.0.0.0:L or [::]:L, silently taking loopback traffic from it. Probe the wildcards first:
+/// binding the identical wildcard address fails with AddrInUse only if something listens there, while
+/// SO_REUSEADDR still tolerates TIME_WAIT leftovers from our own earlier proxy.
+fn wildcard_conflict(local: u16) -> Option<SocketAddr> {
+    let wildcards = [SocketAddr::from((Ipv4Addr::UNSPECIFIED, local)), SocketAddr::from((Ipv6Addr::UNSPECIFIED, local))];
+    wildcards.into_iter().find(|&addr| {
+        let sock = if addr.is_ipv4() { TcpSocket::new_v4() } else { TcpSocket::new_v6() };
+        let Ok(sock) = sock else { return false };
+        let _ = sock.set_reuseaddr(true);
+        matches!(sock.bind(addr), Err(e) if e.kind() == std::io::ErrorKind::AddrInUse)
+    })
+}
+
 async fn bind(local: u16) -> std::io::Result<(TcpListener, Option<TcpListener>)> {
+    if let Some(addr) = wildcard_conflict(local) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::AddrInUse,
+            format!("another server is listening on {addr}; pinning would hijack its localhost traffic"),
+        ));
+    }
     let v4 = TcpListener::bind(SocketAddr::from((Ipv4Addr::LOCALHOST, local))).await?;
     // Also hold ::1 so "localhost" can't resolve to a different listener; IPv6 may be unavailable.
     let v6 = TcpListener::bind(SocketAddr::from((Ipv6Addr::LOCALHOST, local))).await.ok();
@@ -227,6 +247,27 @@ mod tests {
         let v = pins.view("t", 22, port);
         assert_eq!((v.listening, v.error, v.target_port), (false, None, Some(port)));
         drop(busy);
+    }
+
+    #[test]
+    fn refuses_to_shadow_wildcard_listeners() {
+        // std sets SO_REUSEADDR like most servers (Node, Vite, Python) do.
+        for any in ["0.0.0.0:0", "[::]:0"] {
+            let Ok(server) = std::net::TcpListener::bind(any) else { continue }; // no IPv6
+            let port = server.local_addr().unwrap().port();
+            assert!(wildcard_conflict(port).is_some(), "{any}");
+            let pins = Pins::new(Arc::new(|_, _| Some(1)));
+            pins.sync(&[("t".into(), 22, port)]);
+            wait(|| pins.view("t", 22, port).error.is_some());
+            let v = pins.view("t", 22, port);
+            assert!(!v.listening && v.error.as_deref().unwrap().contains("another server"), "{any}: {v:?}");
+            // localhost:port still reaches the original server.
+            let _c = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
+            server.set_nonblocking(false).unwrap();
+            assert!(server.accept().is_ok(), "{any}");
+            pins.stop_all();
+        }
+        assert_eq!(wildcard_conflict(free_port()), None);
     }
 
     #[test]

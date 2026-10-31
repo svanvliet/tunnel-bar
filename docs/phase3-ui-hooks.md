@@ -6,7 +6,7 @@ All commands use Tauri's camelCase argument names. Errors reject the `invoke` pr
 
 ## Guarded actions and error prefixes
 
-`delete_tunnel`, `add_port`, `remove_port`, `set_port_headers`, header changes in `update_tunnel`, and `add_access_rule`/`remove_access_rule` refuse risky changes. The error message starts with a stable prefix, which `errorKind(e)` in `types.ts` maps to a kind. After the user confirms, retry with the matching flag. `stripErrorPrefix(e)` gives a message you can display.
+`delete_tunnel`, `add_port`, `remove_port`, `set_port_headers`, expiration and header changes in `update_tunnel`, `set_anonymous`, and `add_access_rule`/`remove_access_rule` refuse risky changes. The error message starts with a stable prefix, which `errorKind(e)` in `types.ts` maps to a kind. After the user confirms, retry with the matching flag. `stripErrorPrefix(e)` gives a message you can display.
 
 | Prefix | Meaning | Retry with |
 |---|---|---|
@@ -24,7 +24,7 @@ Treat `allowHostedElsewhere` as a deliberate, separate confirmation. Never pass 
 | Command | Args | Returns | Notes |
 |---|---|---|---|
 | `create_tunnel` | `request: CreateTunnelRequest` | tunnel id (`name.cluster`) | Validates input, then creates the tunnel. See below. |
-| `update_tunnel` | `id`, `update: UpdateTunnelRequest`, `allowHostedElsewhere?` | — | Edits description, labels, expiration and tunnel-level Host/Origin headers. See below. |
+| `update_tunnel` | `id`, `update: UpdateTunnelRequest`, `confirm?`, `allowHostedElsewhere?` | — | Edits description, labels, expiration and tunnel-level Host/Origin headers. See below. |
 | `delete_preflight` | `id` | `DeletePreflight` | `{createdByApp, needsConfirm, hostedElsewhere, hostingHere, connectedHere}` |
 | `delete_tunnel` | `id`, `confirm?`, `allowHostedElsewhere?` | — | Stops the local host and connect first. Also drops the tunnel's settings and pins. |
 
@@ -44,9 +44,14 @@ Treat `allowHostedElsewhere` as a deliberate, separate confirmation. Never pass 
 - `description: ""` clears the description.
 - `null` or an omitted field leaves that field unchanged.
 - The cache updates optimistically and a delayed refresh confirms it.
-- No confirmation is needed, except for header fields: those need `allowHostedElsewhere` when another machine hosts the tunnel, and restart our host if it's running.
+- On a tunnel Tunnel Bar didn't create:
+  - Adding or removing the `tunnelbar` label is always refused, because that label is what marks a tunnel as Tunnel Bar's and gates every confirmation.
+  - Changing `expiration` needs `confirm`, because the service deletes the tunnel when it expires.
+- Other edits need no confirmation, except for header fields: those need `allowHostedElsewhere` when another machine hosts the tunnel, and restart our host if it's running.
 
 `delete_tunnel`:
+- Re-reads the tunnel with `devtunnel show` before the guards run, so the label and host count are current.
+- "Hosted elsewhere" means the host count is greater than the one host Tunnel Bar runs, so a dev box hosting alongside this Mac still counts.
 - The existing `delete_tunnel {id}` call still works for app-created tunnels.
 
 ### Ports
@@ -82,7 +87,7 @@ By default the service rewrites `Host` to `localhost` and `Origin` to `http(s):/
 | `remove_access_rule` | `id`, `port?`, `index`, `confirm?` | — | Deletes the own rule at `index` (from `AccessEntry.index`). Same `confirm` rule. |
 
 `AccessRuleRequest` is `{kind, value?, deny?, expiration?, port?}`:
-- `kind: "anonymous"`: anyone (no value). The existing `set_anonymous` toggle still works and only touches anonymous entries.
+- `kind: "anonymous"`: anyone (no value). The existing `set_anonymous {id, allow, confirm?}` toggle still works and only touches anonymous entries. Like the other access commands, it now needs `confirm` on tunnels Tunnel Bar didn't create. The current `+page.svelte` call doesn't pass it, so on such tunnels it gets a `CONFIRM_REQUIRED` error until the UI retries with `confirm: true`.
 - `kind: "tenant"`: everyone in the signed-in user's Entra tenant (no value).
 - `kind: "org"`, `value: "<github-org>"`: needs a **GitHub** sign-in. With a Microsoft sign-in the CLI fails with "must use the same identity provider", which the backend rewrites to "Organization rules need a GitHub sign-in…".
 - `kind: "repo"`, `value: "owner/repo"`, ADO `org/project/repo`, or a URL. CLI 1.0.2115 rejected every form under a Microsoft sign-in ("Specify access control parameters"); the backend rewrites that error. Treat repo rules as best-effort and surface the error.
@@ -120,6 +125,7 @@ By default the service rewrites `Host` to `localhost` and `Origin` to `http(s):/
 - `pins: PinView[]`: each entry is `{remotePort, localPort, listening, targetPort, error}`.
   - `targetPort` is the port that `devtunnel connect` actually chose. It is null while the tunnel is disconnected.
   - `error` is set when the pinned port is busy. The proxy retries every 3 seconds.
+  - A server listening on `0.0.0.0:<port>` or `[::]:<port>` (for example a dev server) counts as busy. macOS would otherwise let the pin take over that server's `localhost` traffic.
 
 **`TunnelPort`**
 - `hostHeader`, `originHeader`: effective header rewriting (`"unchanged"`, a value, or `null` = default).
