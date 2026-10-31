@@ -12,14 +12,14 @@ const TRAY_ID: &str = "main";
 static LAST: Mutex<Option<(TrayState, String)>> = Mutex::new(None);
 
 fn image(state: TrayState) -> Image<'static> {
-    Image::new_owned(icon::render(state), icon::size(), icon::size())
+    icon::image(state)
 }
 
 pub fn create(app: &AppHandle) -> tauri::Result<()> {
     let menu = Menu::with_items(app, &[&MenuItem::with_id(app, "open", "Open Tunnel Bar…", true, None::<&str>)?])?;
     TrayIconBuilder::with_id(TRAY_ID)
         .icon(image(TrayState::Idle))
-        .icon_as_template(true)
+        .icon_as_template(TrayState::Idle.is_template())
         .tooltip("Tunnel Bar")
         .menu(&menu)
         .show_menu_on_left_click(false)

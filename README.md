@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="design/icon-128.png" width="128" height="128" alt="Tunnel Bar: a laptop connected to a server by a copper route">
+</p>
+
 # Tunnel Bar
 
 A macOS menu-bar app for managing [Microsoft Dev Tunnels](https://learn.microsoft.com/azure/developer/dev-tunnels/): connect to tunnels and host your own. It wraps the `devtunnel` CLI, so it uses your existing CLI sign-in.
@@ -46,6 +50,23 @@ npm run tauri build   # release .app in src-tauri/target/release/bundle/macos
 codesign --force --deep -s - src-tauri/target/release/"bundle/macos/Tunnel Bar.app"   # ad-hoc sign
 ./scripts/package-macos.sh   # universal DMG + zip in dist/
 ```
+
+### Icon artwork
+
+The editable app icon is `design/icon.svg`; tray state sources are in
+`design/tray/`. To regenerate the README image, favicon, monochrome macOS
+templates, outlined Windows tray images, and Tauri platform icons, install
+`rsvg-convert` (`brew install librsvg`), then run:
+
+```sh
+node design/render-icons.mjs
+```
+
+macOS uses black-and-alpha templates at 36px (18pt at 2x), including the error
+badge. Windows uses a black symbol with a white edge so it remains readable on
+light and dark taskbars. A hollow server means disconnected, a dashed route
+means connecting/retrying, a filled server means connected, and an exclamation
+badge means attention is needed.
 
 ## Test
 
