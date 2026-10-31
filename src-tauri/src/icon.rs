@@ -61,8 +61,9 @@ mod tests {
         ];
         for (i, state) in states.iter().enumerate() {
             let icon = image(*state);
-            assert_eq!((icon.width(), icon.height()), (36, 36));
-            assert_eq!(icon.rgba().len(), 36 * 36 * 4);
+            let width = if cfg!(target_os = "macos") { 44 } else { 36 };
+            assert_eq!((icon.width(), icon.height()), (width, 36));
+            assert_eq!(icon.rgba().len(), (width * 36 * 4) as usize);
             assert_eq!(state.is_template(), cfg!(target_os = "macos"));
             assert!(icon.rgba().chunks_exact(4).any(|p| p[3] > 200));
             for other in &states[..i] {
@@ -97,7 +98,8 @@ mod tests {
         }
         let error = Image::from_bytes(include_bytes!("../icons/tray/macos/error.png")).unwrap();
         // The exclamation is an alpha knockout, so macOS can tint every state.
-        assert!(error.rgba()[(7 * 36 + 27) * 4 + 3] < 100);
+        assert_eq!((error.width(), error.height()), (44, 36));
+        assert!(error.rgba()[(5 * 44 + 35) * 4 + 3] < 100);
     }
 
     #[test]

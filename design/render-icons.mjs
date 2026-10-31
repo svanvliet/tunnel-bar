@@ -5,8 +5,8 @@ import path from 'node:path';
 
 const design = path.dirname(fileURLToPath(import.meta.url));
 const icons = path.join(design, '../src-tauri/icons');
-const render = (source, output, size) => execFileSync('rsvg-convert',
-  ['-w', String(size), '-h', String(size), '-o', output], { input: source });
+const render = (source, output, size, height = size) => execFileSync('rsvg-convert',
+  ['-w', String(size), '-h', String(height), '-o', output], { input: source });
 const app = readFileSync(path.join(design, 'icon.svg'), 'utf8');
 render(app, path.join(design, 'icon.png'), 1024);
 render(app, path.join(design, 'icon-128.png'), 128);
@@ -26,7 +26,13 @@ for (const platform of ['macos', 'windows']) {
           <feMerge><feMergeNode/><feMergeNode in="SourceGraphic"/></feMerge>
         </filter></defs></svg>`);
     }
-    render(source, path.join(icons, 'tray', platform, `${state}.png`), 36);
+    if (platform === 'macos') {
+      // Crop the empty margins so the glyph matches the optical height of other menu bar items (22x18pt @2x).
+      source = source.replace('width="36" height="36" viewBox="0 0 100 100"', 'width="44" height="36" viewBox="-2 5 97.78 80"');
+      render(source, path.join(icons, 'tray', platform, `${state}.png`), 44, 36);
+    } else {
+      render(source, path.join(icons, 'tray', platform, `${state}.png`), 36);
+    }
   }
 }
 const generated = mkdtempSync(path.join(icons, '.generated-'));
