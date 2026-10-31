@@ -8,7 +8,7 @@ use crate::supervisor::{SupEvent, Supervisor};
 use crate::pin::Pins;
 use crate::{cli, login, settings};
 use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tauri::{AppHandle, Emitter, Manager};
@@ -165,6 +165,7 @@ impl AppState {
                         &settings.label_filter,
                     ),
                     pins: tunnel_settings.pinned_ports.iter().map(|(&r, &l)| self.pins.view(id, r, l)).collect(),
+                    access_rules: details.map(|d| d.access_control.clone()).unwrap_or_default(),
                     host_state,
                     hosted_ports,
                     hosted_elsewhere,
@@ -578,18 +579,23 @@ impl AppState {
             }
         }
         let expiration = req.expiration.as_deref().filter(|e| !e.trim().is_empty()).map(normalize_expiration).transpose()?;
-        let mut ports: Vec<(u16, &'static str)> = Vec::new();
+        let mut ports: Vec<(u16, &'static str, HeaderOptions)> = Vec::new();
         for p in &req.ports {
             if p.port == 0 {
                 return Err("Ports must be between 1 and 65535.".into());
             }
-            if ports.iter().any(|(n, _)| *n == p.port) {
+            if ports.iter().any(|(n, _, _)| *n == p.port) {
                 return Err(format!("Port {} is listed twice.", p.port));
             }
-            ports.push((p.port, validate_protocol(&p.protocol)?));
+            ports.push((p.port, validate_protocol(&p.protocol)?, p.headers.normalized()?));
         }
         if req.host && ports.is_empty() {
             return Err("Add at least one port to host this tunnel.".into());
+        }
+        let headers = req.headers.normalized()?;
+        let rules = req.access_rules.iter().map(AccessRuleRequest::normalized).collect::<Result<Vec<_>, _>>()?;
+        if let Some(p) = rules.iter().filter_map(|r| r.port).find(|p| !ports.iter().any(|(n, _, _)| n == p)) {
+            return Err(format!("Access rule for port {p}, which isn't in the port list."));
         }
         let cli = self.cli_path().await.ok_or("devtunnel CLI not found")?;
         let label_refs: Vec<&str> = labels.iter().map(String::as_str).collect();
@@ -599,15 +605,19 @@ impl AppState {
             &label_refs,
             req.description.trim(),
             expiration.as_deref(),
+            &headers,
         )
         .await?;
         self.logs.push(&id, "app", &format!("Created tunnel ({} port(s))", ports.len()));
         let setup = async {
-            for (port, protocol) in &ports {
-                cli::port_create(&cli, &id, *port, protocol).await?;
+            for (port, protocol, h) in &ports {
+                cli::port_create(&cli, &id, *port, protocol, h).await?;
             }
             if req.anonymous {
                 cli::set_anonymous(&cli, &id, true).await?;
+            }
+            for r in &rules {
+                cli::access_create(&cli, &id, r).await?;
             }
             Ok::<(), String>(())
         };
@@ -629,8 +639,13 @@ impl AppState {
         Ok(id)
     }
 
-    /// Edits description, labels and/or expiration.
-    pub async fn update_tunnel(self: &Arc<Self>, id: &str, mut req: UpdateTunnelRequest) -> Result<(), String> {
+    /// Edits description, labels, expiration and/or tunnel-level header rewriting. Header changes on
+    /// a tunnel another machine hosts need `allow_hosted_elsewhere`.
+    pub async fn update_tunnel(self: &Arc<Self>, id: &str, mut req: UpdateTunnelRequest, allow_hosted_elsewhere: bool) -> Result<(), String> {
+        req.headers = req.headers.normalized()?;
+        if !req.headers.is_empty() {
+            self.check_port_change(id, allow_hosted_elsewhere)?;
+        }
         for l in req.add_labels.iter_mut().chain(req.remove_labels.iter_mut()) {
             *l = l.trim().to_string();
             validate_label(l)?;
@@ -642,6 +657,7 @@ impl AppState {
         let cli = self.cli_path().await.ok_or("devtunnel CLI not found")?;
         cli::update(&cli, id, &req).await?;
         self.logs.push(id, "app", "Tunnel properties updated");
+        let restart_host = !req.headers.is_empty();
         {
             let mut c = self.cache.lock().unwrap();
             let apply = |labels: &mut Vec<String>, description: &mut String, expiration: &mut String| {
@@ -666,6 +682,9 @@ impl AppState {
             }
         }
         self.publish();
+        if restart_host {
+            self.restart_host_if_running(id, cli).await;
+        }
         self.refresh_later(4);
         Ok(())
     }
@@ -680,19 +699,33 @@ impl AppState {
         Ok(())
     }
 
-    pub async fn add_port(self: &Arc<Self>, id: &str, port: u16, protocol: &str, allow_hosted_elsewhere: bool) -> Result<(), String> {
+    pub async fn add_port(
+        self: &Arc<Self>,
+        id: &str,
+        port: u16,
+        protocol: &str,
+        headers: &HeaderOptions,
+        allow_hosted_elsewhere: bool,
+    ) -> Result<(), String> {
         if port == 0 {
             return Err("Enter a port between 1 and 65535.".into());
         }
         let protocol = validate_protocol(protocol)?;
+        let headers = headers.normalized()?;
         self.check_port_change(id, allow_hosted_elsewhere)?;
         let cli = self.cli_path().await.ok_or("devtunnel CLI not found")?;
-        cli::port_create(&cli, id, port, protocol).await?;
+        cli::port_create(&cli, id, port, protocol, &headers).await?;
         self.logs.push(id, "app", &format!("Added port {port} ({protocol})"));
         {
             let mut c = self.cache.lock().unwrap();
             if let Some(d) = c.details.get_mut(id).filter(|d| !d.ports.iter().any(|p| p.port_number == port)) {
-                d.ports.push(TunnelPort { port_number: port, protocol: protocol.into(), port_uri: String::new() });
+                d.ports.push(TunnelPort {
+                    port_number: port,
+                    protocol: protocol.into(),
+                    host_header: headers.host_header.clone(),
+                    origin_header: headers.origin_header.clone(),
+                    ..Default::default()
+                });
                 d.ports.sort_by_key(|p| p.port_number);
             }
             if let Some(s) = c.summaries.iter_mut().find(|s| s.tunnel_id == id) {
@@ -740,8 +773,96 @@ impl AppState {
         Ok(())
     }
 
+    /// Changes one port's Host/Origin header rewriting and restarts our host so it takes effect.
+    pub async fn set_port_headers(
+        self: &Arc<Self>,
+        id: &str,
+        port: u16,
+        headers: &HeaderOptions,
+        allow_hosted_elsewhere: bool,
+    ) -> Result<(), String> {
+        let headers = headers.normalized()?;
+        if headers.is_empty() {
+            return Err("Choose a Host or Origin header setting.".into());
+        }
+        self.check_port_change(id, allow_hosted_elsewhere)?;
+        let cli = self.cli_path().await.ok_or("devtunnel CLI not found")?;
+        cli::port_update_headers(&cli, id, port, &headers).await?;
+        self.logs.push(id, "app", &format!("Updated header rewriting for port {port}"));
+        if let Some(p) = self.cache.lock().unwrap().details.get_mut(id).and_then(|d| d.ports.iter_mut().find(|p| p.port_number == port)) {
+            if headers.host_header.is_some() {
+                p.host_header = headers.host_header.clone();
+            }
+            if headers.origin_header.is_some() {
+                p.origin_header = headers.origin_header.clone();
+            }
+        }
+        self.publish();
+        self.restart_host_if_running(id, cli).await;
+        self.refresh_later(4);
+        Ok(())
+    }
+
+    /// Access rules gate who can connect, so changing them on a tunnel Tunnel Bar didn't create
+    /// (e.g. the user's dev-box SSH tunnel) needs `confirm`.
+    fn check_access_change(&self, id: &str, confirm: bool) -> Result<(), String> {
+        if !confirm && !self.created_by_app(id) {
+            return Err(format!("{CONFIRM_REQUIRED}This tunnel wasn't created by Tunnel Bar. Confirm to change who can connect to it."));
+        }
+        Ok(())
+    }
+
+    /// Re-reads tunnel-level rules into the cache (`show` lags behind `access list`).
+    async fn reload_access(&self, cli: &Path, id: &str) {
+        if let Ok(rules) = cli::access_list(cli, id, None).await
+            && let Some(d) = self.cache.lock().unwrap().details.get_mut(id)
+        {
+            d.access_control = rules;
+        }
+        self.publish();
+    }
+
+    pub async fn list_access_rules(&self, id: &str, port: Option<u16>) -> Result<Vec<AccessEntry>, String> {
+        let cli = self.cli_path().await.ok_or("devtunnel CLI not found")?;
+        cli::access_list(&cli, id, port).await
+    }
+
+    pub async fn add_access_rule(self: &Arc<Self>, id: &str, rule: &AccessRuleRequest, confirm: bool) -> Result<(), String> {
+        let rule = rule.normalized()?;
+        self.check_access_change(id, confirm)?;
+        let cli = self.cli_path().await.ok_or("devtunnel CLI not found")?;
+        cli::access_create(&cli, id, &rule).await?;
+        let scope = rule.port.map(|p| format!(" on port {p}")).unwrap_or_default();
+        let what = if rule.deny { "deny" } else { "allow" };
+        let subject = rule.value.as_deref().map(|v| format!(" {v}")).unwrap_or_default();
+        self.logs.push(id, "app", &format!("Added {what} access rule: {:?}{subject}{scope}", rule.kind));
+        self.reload_access(&cli, id).await;
+        self.refresh_later(4);
+        Ok(())
+    }
+
+    /// Removes the own rule at `index` (from `accessRules` / `list_access_rules`).
+    pub async fn remove_access_rule(self: &Arc<Self>, id: &str, port: Option<u16>, index: usize, confirm: bool) -> Result<(), String> {
+        self.check_access_change(id, confirm)?;
+        let cli = self.cli_path().await.ok_or("devtunnel CLI not found")?;
+        cli::access_delete(&cli, id, port, index).await?;
+        let scope = port.map(|p| format!(" on port {p}")).unwrap_or_default();
+        self.logs.push(id, "app", &format!("Removed access rule #{index}{scope}"));
+        self.reload_access(&cli, id).await;
+        self.refresh_later(4);
+        Ok(())
+    }
+
     /// Creates a Tunnel Bar-labelled tunnel for localhost:port and starts hosting it.
-    pub async fn expose(self: &Arc<Self>, port: u16, protocol: &str, anonymous: bool, name: Option<&str>) -> Result<String, String> {
+    pub async fn expose(
+        self: &Arc<Self>,
+        port: u16,
+        protocol: &str,
+        anonymous: bool,
+        name: Option<&str>,
+        headers: HeaderOptions,
+        access_rules: Vec<AccessRuleRequest>,
+    ) -> Result<String, String> {
         if !matches!(protocol, "http" | "https" | "auto") {
             return Err(format!("Unsupported protocol {protocol}"));
         }
@@ -751,8 +872,10 @@ impl AppState {
         self.create_tunnel(CreateTunnelRequest {
             tunnel_id: name.map(str::to_string),
             description: format!("localhost:{port} exposed by Tunnel Bar"),
-            ports: vec![PortSpec { port, protocol: protocol.into() }],
+            ports: vec![PortSpec { port, protocol: protocol.into(), headers: Default::default() }],
             anonymous,
+            headers,
+            access_rules,
             host: true,
             nickname: name.is_none().then(|| format!("localhost:{port}")),
             ..Default::default()

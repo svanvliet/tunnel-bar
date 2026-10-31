@@ -1,6 +1,6 @@
 //! Thin async wrapper around the `devtunnel` CLI.
 
-use crate::model::{AuthStatus, TunnelDetails, TunnelSummary};
+use crate::model::{AccessEntry, AccessRuleKind, AccessRuleRequest, AuthStatus, HeaderOptions, TunnelDetails, TunnelSummary};
 use serde::Deserialize;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -129,7 +129,11 @@ pub fn parse_list(stdout: &str) -> Result<Vec<TunnelSummary>, String> {
 
 pub fn parse_show(stdout: &str) -> Result<TunnelDetails, String> {
     serde_json::from_str::<ShowResponse>(json_slice(stdout))
-        .map(|r| r.tunnel)
+        .map(|mut r| {
+            r.tunnel.ports.iter_mut().for_each(crate::model::TunnelPort::parse_headers);
+            crate::model::index_access_entries(&mut r.tunnel.access_control);
+            r.tunnel
+        })
         .map_err(|e| format!("could not parse `devtunnel show -j`: {e}"))
 }
 
@@ -188,7 +192,22 @@ pub fn parse_create(stdout: &str) -> Result<String, String> {
         .map_err(|e| format!("could not parse `devtunnel create -j`: {e}"))
 }
 
-pub fn create_args<'a>(id: Option<&'a str>, labels: &[&'a str], description: &'a str, expiration: Option<&'a str>) -> Vec<&'a str> {
+fn push_headers<'a>(args: &mut Vec<&'a str>, h: &'a HeaderOptions) {
+    if let Some(v) = &h.host_header {
+        args.extend(["--host-header", v.as_str()]);
+    }
+    if let Some(v) = &h.origin_header {
+        args.extend(["--origin-header", v.as_str()]);
+    }
+}
+
+pub fn create_args<'a>(
+    id: Option<&'a str>,
+    labels: &[&'a str],
+    description: &'a str,
+    expiration: Option<&'a str>,
+    headers: &'a HeaderOptions,
+) -> Vec<&'a str> {
     let mut args = vec!["create"];
     args.extend(id);
     args.extend(["-j", "-d", description]);
@@ -198,6 +217,7 @@ pub fn create_args<'a>(id: Option<&'a str>, labels: &[&'a str], description: &'a
     if let Some(e) = expiration {
         args.extend(["-e", e]);
     }
+    push_headers(&mut args, headers);
     args
 }
 
@@ -208,8 +228,9 @@ pub async fn create(
     labels: &[&str],
     description: &str,
     expiration: Option<&str>,
+    headers: &HeaderOptions,
 ) -> Result<String, String> {
-    parse_create(&ok(cli, &create_args(id, labels, description, expiration)).await?)
+    parse_create(&ok(cli, &create_args(id, labels, description, expiration, headers)).await?)
 }
 
 /// Builds `devtunnel update` args; None if there's nothing to change.
@@ -227,6 +248,7 @@ pub fn update_args<'a>(id: &'a str, req: &'a crate::model::UpdateTunnelRequest) 
     if let Some(e) = &req.expiration {
         args.extend(["-e", e.as_str()]);
     }
+    push_headers(&mut args, &req.headers);
     (args.len() > 3).then_some(args)
 }
 
@@ -286,9 +308,84 @@ pub fn validate_tunnel_id(id: &str) -> Result<(), String> {
     }
 }
 
-pub async fn port_create(cli: &Path, id: &str, port: u16, protocol: &str) -> Result<(), String> {
+pub async fn port_create(cli: &Path, id: &str, port: u16, protocol: &str, headers: &HeaderOptions) -> Result<(), String> {
     let port = port.to_string();
-    ok(cli, &["port", "create", id, "-p", &port, "--protocol", protocol, "-j"]).await.map(|_| ())
+    let mut args = vec!["port", "create", id, "-p", &port, "--protocol", protocol, "-j"];
+    push_headers(&mut args, headers);
+    ok(cli, &args).await.map(|_| ())
+}
+
+/// Changes a port's Host/Origin header rewriting; no-op when `headers` is empty.
+pub async fn port_update_headers(cli: &Path, id: &str, port: u16, headers: &HeaderOptions) -> Result<(), String> {
+    if headers.is_empty() {
+        return Ok(());
+    }
+    let port = port.to_string();
+    let mut args = vec!["port", "update", id, "-p", &port, "-j"];
+    push_headers(&mut args, headers);
+    ok(cli, &args).await.map(|_| ())
+}
+
+/// Builds `devtunnel access create` args for a (normalized) rule.
+pub fn access_create_args(id: &str, rule: &AccessRuleRequest) -> Vec<String> {
+    let mut args: Vec<String> = vec!["access".into(), "create".into(), id.into()];
+    if let Some(p) = rule.port {
+        args.extend(["-p".into(), p.to_string()]);
+    }
+    match rule.kind {
+        AccessRuleKind::Anonymous => args.push("--anonymous".into()),
+        AccessRuleKind::Tenant => args.push("--tenant".into()),
+        AccessRuleKind::Org => args.extend(["--org".into(), rule.value.clone().unwrap_or_default()]),
+        AccessRuleKind::Repo => args.extend(["--repo".into(), rule.value.clone().unwrap_or_default()]),
+    }
+    if rule.deny {
+        args.push("--deny".into());
+    }
+    if let Some(e) = &rule.expiration {
+        args.extend(["-e".into(), e.clone()]);
+    }
+    args.push("-j".into());
+    args
+}
+
+/// Adds an access rule, translating the CLI's terse validation errors.
+pub async fn access_create(cli: &Path, id: &str, rule: &AccessRuleRequest) -> Result<(), String> {
+    let args = access_create_args(id, rule);
+    let refs: Vec<&str> = args.iter().map(String::as_str).collect();
+    ok(cli, &refs).await.map(|_| ()).map_err(|e| access_error(rule.kind, e))
+}
+
+pub fn access_error(kind: AccessRuleKind, e: String) -> String {
+    if e.contains("same identity provider") {
+        return match kind {
+            AccessRuleKind::Org => "GitHub organization rules need a GitHub sign-in (Sign in with GitHub, then try again).".into(),
+            _ => format!("{e} Sign in with the matching provider and try again."),
+        };
+    }
+    if kind == AccessRuleKind::Repo && e.contains("Specify access control parameters") {
+        return "devtunnel rejected the repository rule. Repository rules may need a sign-in with the repo's provider (GitHub for owner/repo).".into();
+    }
+    e
+}
+
+/// Tunnel-level rules, or a port's rules (including inherited tunnel rules) when `port` is set.
+pub async fn access_list(cli: &Path, id: &str, port: Option<u16>) -> Result<Vec<AccessEntry>, String> {
+    let port = port.map(|p| p.to_string());
+    let mut args = vec!["access", "list", id, "-j"];
+    if let Some(p) = &port {
+        args.extend(["-p", p.as_str()]);
+    }
+    parse_access_list(&ok(cli, &args).await?)
+}
+
+/// Deletes the own (non-inherited) rule at `index`, as numbered by `access_list`.
+pub async fn access_delete(cli: &Path, id: &str, port: Option<u16>, index: usize) -> Result<(), String> {
+    let (index, port) = (index.to_string(), port.map(|p| p.to_string()));
+    let mut args = vec!["access", "delete", id, "-i", &index, "-j"];
+    if let Some(p) = &port {
+        args.extend(["-p", p.as_str()]);
+    }
+    ok(cli, &args).await.map(|_| ())
 }
 
 pub async fn delete(cli: &Path, id: &str) -> Result<(), String> {
@@ -304,7 +401,10 @@ struct AccessList {
 
 pub fn parse_access_list(stdout: &str) -> Result<Vec<crate::model::AccessEntry>, String> {
     serde_json::from_str::<AccessList>(json_slice(stdout))
-        .map(|r| r.access_control_entries)
+        .map(|mut r| {
+            crate::model::index_access_entries(&mut r.access_control_entries);
+            r.access_control_entries
+        })
         .map_err(|e| format!("could not parse `devtunnel access list -j`: {e}"))
 }
 
@@ -315,9 +415,8 @@ pub async fn set_anonymous(cli: &Path, id: &str, allow: bool) -> Result<(), Stri
     }
     // Delete from the highest index down so earlier indexes stay valid.
     let entries = parse_access_list(&ok(cli, &["access", "list", id, "-j"]).await?)?;
-    for i in (0..entries.len()).rev().filter(|&i| entries[i].kind.eq_ignore_ascii_case("anonymous")) {
-        let idx = i.to_string();
-        ok(cli, &["access", "delete", id, "-i", &idx, "-j"]).await?;
+    for i in entries.iter().rev().filter(|e| e.allows_anonymous()).filter_map(|e| e.index) {
+        access_delete(cli, id, None, i).await?;
     }
     Ok(())
 }
@@ -337,23 +436,90 @@ mod tests {
     }
 
     #[test]
-    fn builds_create_update_and_login_args() {
+    fn builds_access_args_and_errors() {
+        let rule = |kind, value: Option<&str>| AccessRuleRequest { kind, value: value.map(Into::into), ..Default::default() };
+        assert_eq!(access_create_args("t", &rule(AccessRuleKind::Anonymous, None)), ["access", "create", "t", "--anonymous", "-j"]);
+        let mut tenant = rule(AccessRuleKind::Tenant, None);
+        tenant.expiration = Some("2h".into());
+        tenant.port = Some(5173);
+        assert_eq!(access_create_args("t", &tenant), ["access", "create", "t", "-p", "5173", "--tenant", "-e", "2h", "-j"]);
+        let mut org = rule(AccessRuleKind::Org, Some("contoso"));
+        org.deny = true;
+        assert_eq!(access_create_args("t", &org), ["access", "create", "t", "--org", "contoso", "--deny", "-j"]);
         assert_eq!(
-            create_args(Some("x"), &["tunnelbar", "a"], "d", Some("8h")),
-            ["create", "x", "-j", "-d", "d", "-l", "tunnelbar", "-l", "a", "-e", "8h"]
+            access_create_args("t", &rule(AccessRuleKind::Repo, Some("o/r"))),
+            ["access", "create", "t", "--repo", "o/r", "-j"]
         );
-        assert_eq!(create_args(None, &[], "", None), ["create", "-j", "-d", ""]);
+        let e = "Access control entries must use the same identity provider as the logged-in user.".to_string();
+        assert!(access_error(AccessRuleKind::Org, e).contains("GitHub sign-in"));
+        assert!(access_error(AccessRuleKind::Repo, "Specify access control parameters.".into()).contains("repository rule"));
+        assert_eq!(access_error(AccessRuleKind::Tenant, "boom".into()), "boom");
+    }
+
+    #[test]
+    fn parses_access_entries_with_inherited_and_expiry() {
+        // `devtunnel access list <id> -p 5173 -j` (CLI 1.0.2115).
+        let acl = parse_access_list(
+            r#"{"accessControlEntries":[
+              {"type":"Organizations","provider":"microsoft","isInherited":true,"subjects":["t1"],"scopes":["connect"],"expiration":"2026-11-01T00:24:53.387279Z"},
+              {"type":"Anonymous","isInherited":true,"isDeny":true,"subjects":[],"scopes":["connect"]},
+              {"type":"Organizations","provider":"microsoft","subjects":["t1"],"scopes":["connect"]},
+              {"type":"Anonymous","subjects":[],"scopes":["connect"]}]}"#,
+        )
+        .unwrap();
+        assert_eq!(acl.iter().map(|e| e.index).collect::<Vec<_>>(), [None, None, Some(0), Some(1)]);
+        assert_eq!(acl[0].expiration.as_deref(), Some("2026-11-01T00:24:53.387279Z"));
+        assert_eq!(acl[0].provider, "microsoft");
+        assert!(acl[1].is_deny && !acl[1].allows_anonymous());
+        assert!(acl[3].allows_anonymous());
+    }
+
+    #[test]
+    fn parses_port_header_options() {
+        let d = parse_show(
+            r#"{"tunnel":{"tunnelId":"x.usw3","ports":[
+              {"portNumber":5173,"protocol":"http","headerOptionDescription":"  (Host:unchanged, Origin:unchanged))"},
+              {"portNumber":5174,"protocol":"auto","headerOptionDescription":"  (Host:localhost, Origin:https://example.com))"},
+              {"portNumber":22,"protocol":"auto"}],
+              "accessControl":[{"type":"Anonymous","subjects":[],"scopes":["connect"]}]}}"#,
+        )
+        .unwrap();
+        assert_eq!(d.ports[0].host_header.as_deref(), Some("unchanged"));
+        assert_eq!(d.ports[0].origin_header.as_deref(), Some("unchanged"));
+        assert_eq!(d.ports[1].host_header.as_deref(), Some("localhost"));
+        assert_eq!(d.ports[1].origin_header.as_deref(), Some("https://example.com"));
+        assert_eq!((d.ports[2].host_header.clone(), d.ports[2].origin_header.clone()), (None, None));
+        assert_eq!(d.access_control[0].index, Some(0));
+    }
+
+    #[test]
+    fn builds_create_update_and_login_args() {
+        let vite = HeaderOptions { host_header: Some("unchanged".into()), origin_header: Some("unchanged".into()) };
+        assert_eq!(
+            create_args(Some("x"), &["tunnelbar", "a"], "d", Some("8h"), &vite),
+            [
+                "create", "x", "-j", "-d", "d", "-l", "tunnelbar", "-l", "a", "-e", "8h", "--host-header", "unchanged",
+                "--origin-header", "unchanged"
+            ]
+        );
+        assert_eq!(create_args(None, &[], "", None, &Default::default()), ["create", "-j", "-d", ""]);
         let req = crate::model::UpdateTunnelRequest {
             description: Some(String::new()),
             add_labels: vec!["a".into(), "b".into()],
             remove_labels: vec!["c".into()],
             expiration: Some("2d".into()),
+            headers: Default::default(),
         };
         assert_eq!(
             update_args("t", &req).unwrap(),
             ["update", "t", "-j", "-d", "", "--add-labels", "a", "--add-labels", "b", "--remove-labels", "c", "-e", "2d"]
         );
         assert!(update_args("t", &Default::default()).is_none());
+        let hdr = crate::model::UpdateTunnelRequest {
+            headers: HeaderOptions { host_header: Some("localhost".into()), origin_header: None },
+            ..Default::default()
+        };
+        assert_eq!(update_args("t", &hdr).unwrap(), ["update", "t", "-j", "--host-header", "localhost"]);
         use crate::model::LoginProvider::*;
         assert_eq!(login_args(Microsoft, false), ["user", "login", "-e"]);
         assert_eq!(login_args(Github, true), ["user", "login", "-g", "-d"]);

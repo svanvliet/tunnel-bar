@@ -29,6 +29,8 @@ A macOS menu-bar app for managing [Microsoft Dev Tunnels](https://learn.microsof
 - Create tunnels with an id, description, labels, an expiration (1h–30d), ports, public access and hosting. Tunnel Bar always adds the `tunnelbar` label.
 - Edit labels, description and expiration. Shows each tunnel's lifetime.
 - Add and remove ports. Tunnel Bar restarts its host so the change takes effect.
+- Access rules beyond public: your Entra tenant, a GitHub organization (needs a GitHub sign-in) or a repository, as allow or deny rules with an optional expiration, on the tunnel or a single port. Changing rules on a tunnel Tunnel Bar didn't create needs confirmation.
+- Host/Origin header rewriting per tunnel or port, including `unchanged` for dev servers like Vite and Next.js.
 - Delete tunnels.
   - Deleting a tunnel Tunnel Bar didn't create needs explicit confirmation.
   - A tunnel hosted by another machine also needs a separate override.

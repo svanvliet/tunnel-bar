@@ -6,7 +6,7 @@ All commands use Tauri's camelCase argument names. Errors reject the `invoke` pr
 
 ## Guarded actions and error prefixes
 
-`delete_tunnel`, `add_port` and `remove_port` refuse risky changes. The error message starts with a stable prefix, which `errorKind(e)` in `types.ts` maps to a kind. After the user confirms, retry with the matching flag. `stripErrorPrefix(e)` gives a message you can display.
+`delete_tunnel`, `add_port`, `remove_port`, `set_port_headers`, header changes in `update_tunnel`, and `add_access_rule`/`remove_access_rule` refuse risky changes. The error message starts with a stable prefix, which `errorKind(e)` in `types.ts` maps to a kind. After the user confirms, retry with the matching flag. `stripErrorPrefix(e)` gives a message you can display.
 
 | Prefix | Meaning | Retry with |
 |---|---|---|
@@ -24,13 +24,15 @@ Treat `allowHostedElsewhere` as a deliberate, separate confirmation. Never pass 
 | Command | Args | Returns | Notes |
 |---|---|---|---|
 | `create_tunnel` | `request: CreateTunnelRequest` | tunnel id (`name.cluster`) | Validates input, then creates the tunnel. See below. |
-| `update_tunnel` | `id`, `update: UpdateTunnelRequest` | — | Edits description, labels and expiration. See below. |
+| `update_tunnel` | `id`, `update: UpdateTunnelRequest`, `allowHostedElsewhere?` | — | Edits description, labels, expiration and tunnel-level Host/Origin headers. See below. |
 | `delete_preflight` | `id` | `DeletePreflight` | `{createdByApp, needsConfirm, hostedElsewhere, hostingHere, connectedHere}` |
 | `delete_tunnel` | `id`, `confirm?`, `allowHostedElsewhere?` | — | Stops the local host and connect first. Also drops the tunnel's settings and pins. |
 
 `create_tunnel`:
 - Always adds the `tunnelbar` label.
-- Adds `ports` and sets `anonymous` if requested.
+- Adds `ports` (each with optional `hostHeader`/`originHeader`) and sets `anonymous` if requested.
+- Tunnel-level `hostHeader`/`originHeader` go on `devtunnel create`; ports inherit them.
+- `accessRules` are applied after the ports. A port-level rule must name a port in `ports`.
 - Starts hosting when `host: true`.
 - Rolls back the tunnel if a later step fails.
 - Validation:
@@ -42,7 +44,7 @@ Treat `allowHostedElsewhere` as a deliberate, separate confirmation. Never pass 
 - `description: ""` clears the description.
 - `null` or an omitted field leaves that field unchanged.
 - The cache updates optimistically and a delayed refresh confirms it.
-- No confirmation is needed.
+- No confirmation is needed, except for header fields: those need `allowHostedElsewhere` when another machine hosts the tunnel, and restart our host if it's running.
 
 `delete_tunnel`:
 - The existing `delete_tunnel {id}` call still works for app-created tunnels.
@@ -51,7 +53,8 @@ Treat `allowHostedElsewhere` as a deliberate, separate confirmation. Never pass 
 
 | Command | Args | Returns | Notes |
 |---|---|---|---|
-| `add_port` | `id`, `port`, `protocol?` (`"http"`, `"https"`, `"auto"`), `allowHostedElsewhere?` | — | See below. |
+| `add_port` | `id`, `port`, `protocol?` (`"http"`, `"https"`, `"auto"`), `hostHeader?`, `originHeader?`, `allowHostedElsewhere?` | — | See below. |
+| `set_port_headers` | `id`, `port`, `headers: HeaderOptions`, `allowHostedElsewhere?` | — | Changes one port's Host/Origin rewriting (`devtunnel port update`). Restarts our host. |
 | `remove_port` | `id`, `port`, `confirm?`, `allowHostedElsewhere?` | — | See below. |
 
 `add_port`:
@@ -61,6 +64,32 @@ Treat `allowHostedElsewhere` as a deliberate, separate confirmation. Never pass 
 - Needs `confirm` for tunnels Tunnel Bar didn't create.
 - Restarts the local host.
 - Removes any pin on that port.
+
+### Host/Origin header rewriting
+
+By default the service rewrites `Host` to `localhost` and `Origin` to `http(s)://localhost`. Each header can be set to `"unchanged"` (`HEADER_UNCHANGED`), which passes the browser's header through, or to a literal value. Values are trimmed and must not contain spaces; `""`/omitted leaves the setting alone.
+
+- Offer a one-click "Dev server (Vite/Next)" preset that sets both headers to `unchanged`. Apps that build absolute URLs or redirects, or compare `Origin` with `Host` (for example Next.js Server Actions and OAuth callbacks), need the real public hostname. With `Host: unchanged`, Vite also needs the tunnel host in `server.allowedHosts`, for example `.devtunnels.ms`. Mention that next to the preset.
+- Where: `create_tunnel` (tunnel and per port), `expose_port` (`hostHeader?`, `originHeader?`), `add_port`, `set_port_headers`, `update_tunnel`.
+- Display: `TunnelPort.hostHeader`/`originHeader` show the effective value per port (parsed from `show`, inherited from the tunnel); `null` means the service default. The tunnel-level setting itself isn't reported by `devtunnel show`.
+
+### Access rules
+
+| Command | Args | Returns | Notes |
+|---|---|---|---|
+| `list_access_rules` | `id`, `port?` | `AccessEntry[]` | Live `devtunnel access list`. With `port`, tunnel-level rules appear with `isInherited: true` and no `index`. |
+| `add_access_rule` | `id`, `rule: AccessRuleRequest`, `confirm?` | — | `devtunnel access create`. Needs `confirm` on tunnels Tunnel Bar didn't create. |
+| `remove_access_rule` | `id`, `port?`, `index`, `confirm?` | — | Deletes the own rule at `index` (from `AccessEntry.index`). Same `confirm` rule. |
+
+`AccessRuleRequest` is `{kind, value?, deny?, expiration?, port?}`:
+- `kind: "anonymous"`: anyone (no value). The existing `set_anonymous` toggle still works and only touches anonymous entries.
+- `kind: "tenant"`: everyone in the signed-in user's Entra tenant (no value).
+- `kind: "org"`, `value: "<github-org>"`: needs a **GitHub** sign-in. With a Microsoft sign-in the CLI fails with "must use the same identity provider", which the backend rewrites to "Organization rules need a GitHub sign-in…".
+- `kind: "repo"`, `value: "owner/repo"`, ADO `org/project/repo`, or a URL. CLI 1.0.2115 rejected every form under a Microsoft sign-in ("Specify access control parameters"); the backend rewrites that error. Treat repo rules as best-effort and surface the error.
+- `deny: true` makes a deny rule. `expiration` is 1h–30d. Note: the service caps tenant-rule expiry by its own policy; `AccessEntry.expiration` shows what the service actually stored, which may differ from the requested `-e`.
+- `port` makes a port-level rule; omit for tunnel-level.
+
+`TunnelView.accessRules` holds the tunnel-level entries from the last refresh, and is reloaded right after add/remove. Display `type` (`Anonymous`, `Organizations` = tenant, `GitHubOrganization`/`GitHubRepository`, …), `isDeny`, and `expiration`. `subjects` holds tenant ids / org ids, not friendly names.
 
 ### Pins and label filter
 
@@ -87,9 +116,13 @@ Treat `allowHostedElsewhere` as a deliberate, separate confirmation. Never pass 
 **`TunnelView`**
 - `expirationHours: number | null`: the tunnel's lifetime from the service. The CLI only reports a duration such as "30 days", not an absolute date. Display it with `expirationLabel(hours)`.
 - `matchesFilter: boolean`: dim or hide the tunnel when this is false. The tray menu stays unfiltered.
+- `accessRules: AccessEntry[]`: tunnel-level access rules. See Access rules above.
 - `pins: PinView[]`: each entry is `{remotePort, localPort, listening, targetPort, error}`.
   - `targetPort` is the port that `devtunnel connect` actually chose. It is null while the tunnel is disconnected.
   - `error` is set when the pinned port is busy. The proxy retries every 3 seconds.
+
+**`TunnelPort`**
+- `hostHeader`, `originHeader`: effective header rewriting (`"unchanged"`, a value, or `null` = default).
 
 **`TunnelSettings`**
 - `pinnedPorts: Record<string, number>`, mapping remote port to local port.
@@ -122,5 +155,5 @@ Treat `allowHostedElsewhere` as a deliberate, separate confirmation. Never pass 
 - **Expiration**
   - Valid choices are 1h–30d (for example 1h, 8h, 1d, 7d, 30d).
 - **Creating a tunnel**
-  - The existing "Expose local port" flow is unchanged (`expose_port`). It now goes through `create_tunnel` internally.
+  - The existing "Expose local port" flow is unchanged (`expose_port`). It now goes through `create_tunnel` internally, and accepts optional `name`, `hostHeader`, `originHeader` and `accessRules` (e.g. `[{kind:"tenant"}]` for "my org only").
   - A full "New tunnel" form can call `create_tunnel` directly.

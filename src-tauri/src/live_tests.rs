@@ -6,7 +6,7 @@
 
 use crate::cli;
 use crate::logs::LogStore;
-use crate::model::{ConnState, Role, UpdateTunnelRequest};
+use crate::model::{AccessRuleKind, AccessRuleRequest, ConnState, HeaderOptions, Role, UpdateTunnelRequest};
 use crate::pin::Pins;
 use crate::supervisor::Supervisor;
 use std::io::{Read, Write};
@@ -61,6 +61,10 @@ fn get(port: u16) -> String {
     s
 }
 
+fn unchanged() -> HeaderOptions {
+    HeaderOptions { host_header: Some("unchanged".into()), origin_header: Some("unchanged".into()) }
+}
+
 fn wait(mut f: impl FnMut() -> bool) -> bool {
     for _ in 0..600 {
         if f() {
@@ -80,7 +84,7 @@ fn live_manage_lifecycle_and_pin() {
     let name = format!("{PREFIX}{nonce}");
 
     // Create with labels, description and the 1h expiration.
-    let id = rt.block_on(cli::create(&cli, Some(&name), &["tunnelbar", "tbtest"], "phase3 live", Some("1h"))).unwrap();
+    let id = rt.block_on(cli::create(&cli, Some(&name), &["tunnelbar", "tbtest"], "phase3 live", Some("1h"), &unchanged())).unwrap();
     let _guard = TempTunnel { cli: cli.clone(), id: id.clone() };
     assert!(id.starts_with(&name), "{id}");
     let d = rt.block_on(cli::show(&cli, &id)).unwrap();
@@ -93,6 +97,7 @@ fn live_manage_lifecycle_and_pin() {
         add_labels: vec!["alpha".into(), "beta".into()],
         remove_labels: vec!["tbtest".into()],
         expiration: Some("2h".into()),
+        headers: Default::default(),
     };
     rt.block_on(cli::update(&cli, &id, &req)).unwrap();
     let ok = wait(|| {
@@ -108,8 +113,42 @@ fn live_manage_lifecycle_and_pin() {
     // Add two ports, remove one.
     let served = http_server("tunnelbar-pin-ok");
     let extra = free_port();
-    rt.block_on(cli::port_create(&cli, &id, served, "http")).unwrap();
-    rt.block_on(cli::port_create(&cli, &id, extra, "auto")).unwrap();
+    rt.block_on(cli::port_create(&cli, &id, served, "http", &Default::default())).unwrap();
+    let custom = HeaderOptions { host_header: Some("localhost".into()), origin_header: Some("https://example.com".into()) };
+    rt.block_on(cli::port_create(&cli, &id, extra, "auto", &custom)).unwrap();
+    let hdrs = |port: u16| {
+        let d = rt.block_on(cli::show(&cli, &id)).unwrap();
+        d.ports.iter().find(|p| p.port_number == port).map(|p| (p.host_header.clone(), p.origin_header.clone()))
+    };
+    let some = |s: &str| Some(s.to_string());
+    // Ports inherit the tunnel-level `unchanged` unless they set their own.
+    assert!(wait(|| hdrs(served) == Some((some("unchanged"), some("unchanged")))), "inherited: {:?}", hdrs(served));
+    assert!(wait(|| hdrs(extra) == Some((some("localhost"), some("https://example.com")))), "custom: {:?}", hdrs(extra));
+    let host_only = HeaderOptions { host_header: Some("unchanged".into()), origin_header: None };
+    rt.block_on(cli::port_update_headers(&cli, &id, extra, &host_only)).unwrap();
+    assert!(wait(|| hdrs(extra).is_some_and(|h| h.0 == some("unchanged"))), "updated: {:?}", hdrs(extra));
+
+    // Tenant access rule with an expiration on the tunnel and a deny-anonymous on a port; list, then remove.
+    let tenant = AccessRuleRequest { kind: AccessRuleKind::Tenant, expiration: Some("2h".into()), ..Default::default() };
+    rt.block_on(cli::access_create(&cli, &id, &tenant.normalized().unwrap())).unwrap();
+    let rules = rt.block_on(cli::access_list(&cli, &id, None)).unwrap();
+    eprintln!("tunnel rules: {rules:?}");
+    let t = rules.iter().find(|e| e.kind == "Organizations").expect("tenant rule");
+    assert_eq!(t.index, Some(0));
+    assert!(t.expiration.is_some(), "expiration on rule");
+    let deny = AccessRuleRequest { kind: AccessRuleKind::Anonymous, deny: true, port: Some(extra), ..Default::default() };
+    rt.block_on(cli::access_create(&cli, &id, &deny)).unwrap();
+    let port_rules = rt.block_on(cli::access_list(&cli, &id, Some(extra))).unwrap();
+    eprintln!("port rules: {port_rules:?}");
+    assert!(port_rules.iter().any(|e| e.is_inherited && e.kind == "Organizations"));
+    let own: Vec<_> = port_rules.iter().filter(|e| !e.is_inherited).collect();
+    assert_eq!(own.len(), 1);
+    assert!(own[0].is_deny && own[0].index == Some(0));
+    rt.block_on(cli::access_delete(&cli, &id, Some(extra), 0)).unwrap();
+    assert!(rt.block_on(cli::access_list(&cli, &id, Some(extra))).unwrap().iter().all(|e| e.is_inherited));
+    rt.block_on(cli::access_delete(&cli, &id, None, 0)).unwrap();
+    assert!(rt.block_on(cli::access_list(&cli, &id, None)).unwrap().is_empty());
+
     rt.block_on(cli::port_delete(&cli, &id, extra)).unwrap();
     assert!(wait(|| {
         let ports: Vec<u16> = rt.block_on(cli::show(&cli, &id)).unwrap().ports.iter().map(|p| p.port_number).collect();

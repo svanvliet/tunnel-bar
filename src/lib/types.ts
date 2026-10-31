@@ -8,7 +8,30 @@ export type ConnState =
   | { kind: "external"; pid: number };
 
 export interface Forward { localPort: number; remotePort: number }
-export interface TunnelPort { portNumber: number; protocol: string; portUri: string }
+export interface TunnelPort {
+  portNumber: number; protocol: string; portUri: string;
+  /** Effective Host/Origin rewriting ("unchanged" or a value; inherited from the tunnel). null = service default (localhost). */
+  hostHeader?: string | null; originHeader?: string | null;
+}
+/** Host/Origin header rewriting for web clients. "unchanged" keeps the browser's header (Vite/Next dev servers need this for Host). Omit = leave as is. */
+export interface HeaderOptions { hostHeader?: string | null; originHeader?: string | null }
+export const HEADER_UNCHANGED = "unchanged";
+/** One `devtunnel access` entry. `index` (own entries only) is what `remove_access_rule` takes; inherited (tunnel-level, seen on a port) entries have none. */
+export interface AccessEntry {
+  type: string; provider: string; subjects: string[]; scopes: string[];
+  isDeny: boolean; isInherited: boolean; expiration?: string | null; index?: number | null;
+}
+export type AccessRuleKind = "anonymous" | "tenant" | "org" | "repo";
+export interface AccessRuleRequest {
+  kind: AccessRuleKind;
+  /** org: GitHub org; repo: owner/repo, ADO org/project/repo or URL; none for anonymous/tenant. */
+  value?: string | null;
+  deny?: boolean;
+  /** "2h", "7d", … (1h–30d); permanent when omitted. */
+  expiration?: string | null;
+  /** Port-level rule; tunnel-level when omitted. */
+  port?: number | null;
+}
 export interface TunnelSettings {
   nickname?: string | null; autoConnect: boolean; autoHost: boolean; sshHost?: string | null;
   /** Stable local ports: remote port -> local port (keys are stringified numbers). Prefer `set_pinned_port`. */
@@ -30,6 +53,8 @@ export interface TunnelView {
   /** False when `settings.labelFilter` is set and this tunnel has none of those labels. */
   matchesFilter: boolean;
   pins: PinView[];
+  /** Tunnel-level access rules (from the last refresh). */
+  accessRules: AccessEntry[];
 }
 export interface Settings {
   cliPath?: string | null; launchAtLogin: boolean; notifications: boolean;
@@ -49,14 +74,17 @@ export interface Snapshot {
   hotkeyError?: string | null;
 }
 
-export interface PortSpec { port: number; protocol?: "http" | "https" | "auto" | "" }
-export interface CreateTunnelRequest {
+export interface PortSpec extends HeaderOptions { port: number; protocol?: "http" | "https" | "auto" | "" }
+export interface CreateTunnelRequest extends HeaderOptions {
   tunnelId?: string | null; description?: string; labels?: string[];
   /** "8h", "30d", … (1h–30d); service default (30 days) when omitted. */
   expiration?: string | null;
   ports?: PortSpec[]; anonymous?: boolean; host?: boolean; nickname?: string | null;
+  /** Applied after ports/anonymous; port-level rules must name a port in `ports`. */
+  accessRules?: AccessRuleRequest[];
 }
-export interface UpdateTunnelRequest {
+/** Header fields change tunnel-level rewriting (needs `allowHostedElsewhere` if hosted elsewhere; restarts our host). */
+export interface UpdateTunnelRequest extends HeaderOptions {
   /** null/omitted = unchanged; "" clears it. */
   description?: string | null;
   addLabels?: string[]; removeLabels?: string[];

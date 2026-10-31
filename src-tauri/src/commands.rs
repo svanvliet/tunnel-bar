@@ -1,5 +1,5 @@
 use crate::app::Shared;
-use crate::model::{CreateTunnelRequest, DeletePreflight, LogLine, LoginProvider, Snapshot, TunnelSettings, UpdateTunnelRequest};
+use crate::model::{AccessEntry, AccessRuleRequest, CreateTunnelRequest, HeaderOptions, DeletePreflight, LogLine, LoginProvider, Snapshot, TunnelSettings, UpdateTunnelRequest};
 use crate::ssh;
 use tauri::{AppHandle, State};
 use tauri_plugin_autostart::ManagerExt;
@@ -37,8 +37,19 @@ pub fn stop_host(state: State<'_, Shared>, id: String) {
 }
 
 #[tauri::command]
-pub async fn expose_port(state: State<'_, Shared>, port: u16, protocol: String, anonymous: bool, name: Option<String>) -> Result<String, String> {
-    state.inner().clone().expose(port, &protocol, anonymous, name.as_deref()).await
+#[allow(clippy::too_many_arguments)]
+pub async fn expose_port(
+    state: State<'_, Shared>,
+    port: u16,
+    protocol: String,
+    anonymous: bool,
+    name: Option<String>,
+    host_header: Option<String>,
+    origin_header: Option<String>,
+    access_rules: Option<Vec<AccessRuleRequest>>,
+) -> Result<String, String> {
+    let headers = HeaderOptions { host_header, origin_header };
+    state.inner().clone().expose(port, &protocol, anonymous, name.as_deref(), headers, access_rules.unwrap_or_default()).await
 }
 
 #[tauri::command]
@@ -68,8 +79,13 @@ pub async fn create_tunnel(state: State<'_, Shared>, request: CreateTunnelReques
 }
 
 #[tauri::command]
-pub async fn update_tunnel(state: State<'_, Shared>, id: String, update: UpdateTunnelRequest) -> Result<(), String> {
-    state.inner().clone().update_tunnel(&id, update).await
+pub async fn update_tunnel(
+    state: State<'_, Shared>,
+    id: String,
+    update: UpdateTunnelRequest,
+    allow_hosted_elsewhere: Option<bool>,
+) -> Result<(), String> {
+    state.inner().clone().update_tunnel(&id, update, allow_hosted_elsewhere.unwrap_or(false)).await
 }
 
 #[tauri::command]
@@ -78,10 +94,48 @@ pub async fn add_port(
     id: String,
     port: u16,
     protocol: Option<String>,
+    host_header: Option<String>,
+    origin_header: Option<String>,
     allow_hosted_elsewhere: Option<bool>,
 ) -> Result<(), String> {
     let protocol = protocol.unwrap_or_default();
-    state.inner().clone().add_port(&id, port, &protocol, allow_hosted_elsewhere.unwrap_or(false)).await
+    let headers = HeaderOptions { host_header, origin_header };
+    state.inner().clone().add_port(&id, port, &protocol, &headers, allow_hosted_elsewhere.unwrap_or(false)).await
+}
+
+/// `headers` is `{ hostHeader?, originHeader? }`; `"unchanged"` passes the browser's value through.
+#[tauri::command]
+pub async fn set_port_headers(
+    state: State<'_, Shared>,
+    id: String,
+    port: u16,
+    headers: HeaderOptions,
+    allow_hosted_elsewhere: Option<bool>,
+) -> Result<(), String> {
+    state.inner().clone().set_port_headers(&id, port, &headers, allow_hosted_elsewhere.unwrap_or(false)).await
+}
+
+#[tauri::command]
+pub async fn list_access_rules(state: State<'_, Shared>, id: String, port: Option<u16>) -> Result<Vec<AccessEntry>, String> {
+    state.list_access_rules(&id, port).await
+}
+
+/// Fails with `CONFIRM_REQUIRED: ` on tunnels Tunnel Bar didn't create until `confirm` is passed.
+#[tauri::command]
+pub async fn add_access_rule(state: State<'_, Shared>, id: String, rule: AccessRuleRequest, confirm: Option<bool>) -> Result<(), String> {
+    state.inner().clone().add_access_rule(&id, &rule, confirm.unwrap_or(false)).await
+}
+
+/// `index` is the entry's `index` from `accessRules` / `list_access_rules` (inherited entries have none).
+#[tauri::command]
+pub async fn remove_access_rule(
+    state: State<'_, Shared>,
+    id: String,
+    port: Option<u16>,
+    index: usize,
+    confirm: Option<bool>,
+) -> Result<(), String> {
+    state.inner().clone().remove_access_rule(&id, port, index, confirm.unwrap_or(false)).await
 }
 
 #[tauri::command]

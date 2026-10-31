@@ -20,6 +20,27 @@ pub struct TunnelPort {
     pub port_number: u16,
     pub protocol: String,
     pub port_uri: String,
+    /// `show -j` summary of header rewriting, e.g. "  (Host:unchanged, Origin:unchanged))".
+    #[serde(skip_serializing)]
+    pub header_option_description: String,
+    /// Effective Host header rewrite ("unchanged" or a value); None = service default ("localhost").
+    pub host_header: Option<String>,
+    /// Effective Origin header rewrite; None = service default ("http(s)://localhost").
+    pub origin_header: Option<String>,
+}
+
+impl TunnelPort {
+    /// Fills `host_header`/`origin_header` from `header_option_description`.
+    pub fn parse_headers(&mut self) {
+        let d = self.header_option_description.trim().trim_start_matches('(').trim_end_matches(')');
+        for part in d.split(", ") {
+            match part.split_once(':') {
+                Some(("Host", v)) if !v.is_empty() => self.host_header = Some(v.to_string()),
+                Some(("Origin", v)) if !v.is_empty() => self.origin_header = Some(v.to_string()),
+                _ => {}
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
@@ -31,6 +52,26 @@ pub struct AccessEntry {
     pub scopes: Vec<String>,
     #[serde(alias = "deny")]
     pub is_deny: bool,
+    /// "microsoft" / "github" for tenant, org and repo rules.
+    pub provider: String,
+    /// Port rules list the tunnel's rules too, marked inherited (they can't be deleted at port level).
+    pub is_inherited: bool,
+    /// Absolute expiry (RFC 3339) of a rule created with `-e`.
+    pub expiration: Option<String>,
+    /// Index to pass to `remove_access_rule`; None for inherited rules.
+    #[serde(skip_deserializing)]
+    pub index: Option<usize>,
+}
+
+/// Assigns `index` the way `devtunnel access delete -i` counts: own (non-inherited) rules only.
+pub fn index_access_entries(entries: &mut [AccessEntry]) {
+    let mut n = 0;
+    for e in entries {
+        e.index = (!e.is_inherited).then(|| {
+            n += 1;
+            n - 1
+        });
+    }
 }
 
 impl AccessEntry {
@@ -185,6 +226,8 @@ pub struct TunnelView {
     pub matches_filter: bool,
     /// Stable-port proxies configured for this tunnel.
     pub pins: Vec<PinView>,
+    /// Tunnel-level access rules (with `index` for `remove_access_rule`); empty until details load.
+    pub access_rules: Vec<AccessEntry>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
@@ -205,6 +248,91 @@ pub struct PortSpec {
     pub port: u16,
     /// "http", "https" or "auto" (default).
     pub protocol: String,
+    /// Per-port header rewriting; unset fields inherit the tunnel's.
+    #[serde(flatten)]
+    pub headers: HeaderOptions,
+}
+
+/// Host/Origin header rewriting for web clients. Each field is "unchanged" (keep the browser's
+/// header; needed by dev servers like Vite/Next that check Host) or a replacement value.
+/// None leaves the setting alone (service default: Host "localhost", Origin "http(s)://localhost").
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+#[serde(rename_all = "camelCase", default)]
+pub struct HeaderOptions {
+    pub host_header: Option<String>,
+    pub origin_header: Option<String>,
+}
+
+impl HeaderOptions {
+    pub fn is_empty(&self) -> bool {
+        self.host_header.is_none() && self.origin_header.is_none()
+    }
+
+    /// Trims, drops empty values, rejects whitespace/control characters.
+    pub fn normalized(&self) -> Result<Self, String> {
+        let clean = |v: &Option<String>, what: &str| -> Result<Option<String>, String> {
+            let Some(v) = v.as_deref().map(str::trim).filter(|v| !v.is_empty()) else { return Ok(None) };
+            if v.len() > 255 || v.chars().any(|c| c.is_whitespace() || c.is_control()) {
+                return Err(format!("Invalid {what} header “{v}”: use \"unchanged\" or a value without spaces."));
+            }
+            Ok(Some(if v.eq_ignore_ascii_case(HEADER_UNCHANGED) { HEADER_UNCHANGED.into() } else { v.to_string() }))
+        };
+        Ok(Self { host_header: clean(&self.host_header, "Host")?, origin_header: clean(&self.origin_header, "Origin")? })
+    }
+}
+
+pub const HEADER_UNCHANGED: &str = "unchanged";
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "camelCase")]
+pub enum AccessRuleKind {
+    /// Anyone, no sign-in.
+    #[default]
+    Anonymous,
+    /// Everyone in the signed-in user's Entra tenant.
+    Tenant,
+    /// Members of a GitHub organization (`value` = org; needs a GitHub sign-in).
+    Org,
+    /// Users with access to a repo (`value` = URL, GitHub owner/repo or ADO org/project/repo).
+    Repo,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+#[serde(rename_all = "camelCase", default)]
+pub struct AccessRuleRequest {
+    pub kind: AccessRuleKind,
+    pub value: Option<String>,
+    /// Deny rule instead of allow.
+    pub deny: bool,
+    /// Rule lifetime, e.g. "8h" or "7d" (1h..30d); permanent when None.
+    pub expiration: Option<String>,
+    /// Port-level rule; tunnel-level when None.
+    pub port: Option<u16>,
+}
+
+impl AccessRuleRequest {
+    pub fn normalized(&self) -> Result<Self, String> {
+        let value = self.value.as_deref().map(str::trim).filter(|v| !v.is_empty()).map(str::to_string);
+        match (self.kind, &value) {
+            (AccessRuleKind::Anonymous | AccessRuleKind::Tenant, Some(_)) => {
+                return Err("This access rule doesn't take a value.".into());
+            }
+            (AccessRuleKind::Org, None) => return Err("Enter a GitHub organization.".into()),
+            (AccessRuleKind::Org, Some(v)) if !(1..=39).contains(&v.len()) || !v.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') => {
+                return Err(format!("Invalid GitHub organization “{v}”."));
+            }
+            (AccessRuleKind::Repo, None) => return Err("Enter a repository (owner/repo, org/project/repo or URL).".into()),
+            (AccessRuleKind::Repo, Some(v)) if v.chars().any(char::is_whitespace) || (!v.contains('/')) => {
+                return Err(format!("Invalid repository “{v}”: use owner/repo, org/project/repo or a URL."));
+            }
+            _ => {}
+        }
+        if self.port == Some(0) {
+            return Err("Ports must be between 1 and 65535.".into());
+        }
+        let expiration = self.expiration.as_deref().filter(|e| !e.trim().is_empty()).map(normalize_expiration).transpose()?;
+        Ok(Self { kind: self.kind, value, deny: self.deny, expiration, port: self.port })
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
@@ -219,6 +347,11 @@ pub struct CreateTunnelRequest {
     pub expiration: Option<String>,
     pub ports: Vec<PortSpec>,
     pub anonymous: bool,
+    /// Tunnel-level header rewriting (ports inherit it).
+    #[serde(flatten)]
+    pub headers: HeaderOptions,
+    /// Extra access rules added after the ports (port-level rules must name a listed port).
+    pub access_rules: Vec<AccessRuleRequest>,
     /// Start hosting from this Mac after creating.
     pub host: bool,
     pub nickname: Option<String>,
@@ -231,6 +364,9 @@ pub struct UpdateTunnelRequest {
     pub add_labels: Vec<String>,
     pub remove_labels: Vec<String>,
     pub expiration: Option<String>,
+    /// Tunnel-level header rewriting; ports without their own setting inherit it.
+    #[serde(flatten)]
+    pub headers: HeaderOptions,
 }
 
 /// What deleting a tunnel would require; lets the UI ask before calling `delete_tunnel`.
@@ -358,6 +494,44 @@ pub struct LogLine {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn normalizes_header_options() {
+        let h = |a: &str, b: &str| HeaderOptions { host_header: Some(a.into()), origin_header: Some(b.into()) };
+        let n = h(" Unchanged ", "https://example.com").normalized().unwrap();
+        assert_eq!(n, h("unchanged", "https://example.com"));
+        assert!(h("", " ").normalized().unwrap().is_empty());
+        assert!(h("a b", "").normalized().is_err());
+        assert!(h(&"x".repeat(256), "").normalized().is_err());
+        // Flattened into requests: camelCase top-level fields.
+        let r: CreateTunnelRequest = serde_json::from_str(
+            r#"{"hostHeader":"unchanged","ports":[{"port":5173,"originHeader":"unchanged"}],"accessRules":[{"kind":"tenant","expiration":"2h"}]}"#,
+        )
+        .unwrap();
+        assert_eq!(r.headers.host_header.as_deref(), Some("unchanged"));
+        assert_eq!(r.ports[0].headers.origin_header.as_deref(), Some("unchanged"));
+        assert_eq!(r.access_rules[0].kind, AccessRuleKind::Tenant);
+    }
+
+    #[test]
+    fn validates_access_rule_requests() {
+        let r = |kind, value: Option<&str>| AccessRuleRequest { kind, value: value.map(Into::into), ..Default::default() };
+        assert!(r(AccessRuleKind::Tenant, None).normalized().is_ok());
+        assert!(r(AccessRuleKind::Anonymous, Some("x")).normalized().is_err());
+        assert!(r(AccessRuleKind::Org, None).normalized().is_err());
+        assert!(r(AccessRuleKind::Org, Some("bad org")).normalized().is_err());
+        assert_eq!(r(AccessRuleKind::Org, Some(" contoso ")).normalized().unwrap().value.as_deref(), Some("contoso"));
+        assert!(r(AccessRuleKind::Repo, Some("noslash")).normalized().is_err());
+        assert!(r(AccessRuleKind::Repo, Some("org/project/repo")).normalized().is_ok());
+        let mut e = r(AccessRuleKind::Tenant, None);
+        e.expiration = Some("2H".into());
+        assert_eq!(e.normalized().unwrap().expiration.as_deref(), Some("2h"));
+        e.expiration = Some("90d".into());
+        assert!(e.normalized().is_err());
+        e.expiration = None;
+        e.port = Some(0);
+        assert!(e.normalized().is_err());
+    }
 
     #[test]
     fn derives_inspect_uri() {
