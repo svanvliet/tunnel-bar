@@ -1357,8 +1357,11 @@ impl AppState {
                 .collect()
         };
         for id in ids {
-            if !self.supervisor.is_active(&id) && self.external_pid(&id).is_none() {
+            let hosted_here = self.hoster.is_active(&id) || self.external_host_pid(&id).is_some();
+            if should_auto_connect(self.supervisor.is_active(&id), self.external_pid(&id).is_some(), hosted_here) {
                 let _ = self.connect(&id).await;
+            } else if hosted_here {
+                self.logs.push(&id, "app", "Auto-connect skipped: hosted on this device");
             }
         }
         let host_ids: Vec<String> = {
@@ -1503,6 +1506,12 @@ fn port_listening(port: u16) -> bool {
     })
 }
 
+/// Auto-connect only when not already connected (by us or externally) and not hosted on this device,
+/// where connecting would just loop back to our own host. The saved setting is left untouched.
+fn should_auto_connect(connected_here: bool, external_client: bool, hosted_here: bool) -> bool {
+    !connected_here && !external_client && !hosted_here
+}
+
 /// How long another device must be seen hosting, with no host here, before we forget hosting it.
 /// Covers the service still reporting our own just-stopped host.
 const HOSTED_HERE_GRACE: Duration = Duration::from_secs(60);
@@ -1522,6 +1531,14 @@ fn next_hosted_here(remembered: bool, live: bool, host_online: bool, admin_notic
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn auto_connect_skips_tunnels_hosted_on_this_device() {
+        assert!(should_auto_connect(false, false, false));
+        assert!(!should_auto_connect(false, false, true));
+        assert!(!should_auto_connect(true, false, false));
+        assert!(!should_auto_connect(false, true, false));
+    }
 
     #[test]
     fn remembers_hosting_here_until_another_device_hosts() {

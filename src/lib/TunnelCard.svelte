@@ -2,7 +2,7 @@
   import { tick } from "svelte";
   import { fade } from "svelte/transition";
   import Icon from "./Icon.svelte";
-  import { hostOn, canHost, isSsh } from "./tunnels";
+  import { hostOn, canHost, isSsh, autoConnectBlocked, autoHostBlocked } from "./tunnels";
   import type { TunnelAction, TunnelRole } from "./tunnels";
   import { stateLabel, hostLabel, tone, isActive } from "./types";
   import type { TunnelView, Forward, HostedPort, TunnelSettings } from "./types";
@@ -133,8 +133,8 @@
       </button>
     {:else if local && !hostOn(t)}
       <span class="spacer"></span>
-      <label class="auto-toggle" title="Host automatically when Tunnel Bar starts">
-        <input type="checkbox" checked={t.settings.autoHost} disabled={busy} onchange={(event) => onSave(t, { autoHost: event.currentTarget.checked })} />Auto-host
+      <label class="auto-toggle" title={autoHostBlocked(t) ?? "Host automatically when Tunnel Bar starts"}>
+        <input type="checkbox" checked={t.settings.autoHost} disabled={busy || !!autoHostBlocked(t)} onchange={(event) => onSave(t, { autoHost: event.currentTarget.checked })} />Auto-host
       </label>
     {/if}
   </div>
@@ -214,8 +214,8 @@
           onclick={() => onAction(t, "host")}>Host</button>
       {/if}
       <span class="spacer"></span>
-      <label class="auto-toggle" title="Host automatically when Tunnel Bar starts">
-        <input type="checkbox" checked={t.settings.autoHost} disabled={busy} onchange={(event) => onSave(t, { autoHost: event.currentTarget.checked })} />Auto-host
+      <label class="auto-toggle" title={autoHostBlocked(t) ?? "Host automatically when Tunnel Bar starts"}>
+        <input type="checkbox" checked={t.settings.autoHost} disabled={busy || !!autoHostBlocked(t)} onchange={(event) => onSave(t, { autoHost: event.currentTarget.checked })} />Auto-host
       </label>
     {:else}
       {#if t.state.kind === "external"}
@@ -234,8 +234,8 @@
         <button class:primary={t.hostedHere !== "last"} disabled={busy || !ready} title={t.hostedHere === "last" ? "This device hosted this tunnel last" : undefined} onclick={() => onAction(t, "connect")}>Connect</button>
       {/if}
       <span class="spacer"></span>
-      <label class="auto-toggle" title="Connect automatically when Tunnel Bar starts">
-        <input type="checkbox" checked={t.settings.autoConnect} disabled={busy} onchange={(event) => onSave(t, { autoConnect: event.currentTarget.checked })} />Auto
+      <label class="auto-toggle" title={autoConnectBlocked(t) ?? "Connect automatically when Tunnel Bar starts"}>
+        <input type="checkbox" checked={t.settings.autoConnect} disabled={busy || !!autoConnectBlocked(t)} onchange={(event) => onSave(t, { autoConnect: event.currentTarget.checked })} />Auto
       </label>
     {/if}
   </div>

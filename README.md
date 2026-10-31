@@ -12,7 +12,7 @@ A macOS menu-bar and Windows tray app for managing [Microsoft Dev Tunnels](https
 
 - Browse your account's tunnels in **Remote connections** and **Local tunnels**, with host online/offline status.
 - Connect and disconnect, with auto-reconnect using exponential backoff. Stops retrying on auth errors.
-- Per-tunnel **Auto** connect on launch.
+- Per-tunnel **Auto** connect on launch. It's disabled (setting kept) while this device hosts the tunnel, since connecting would loop back to its own host.
 - Detects `devtunnel connect` and `devtunnel host` processes started outside Tunnel Bar, with **Take over** and **Stop**. An external host gets Take over and Stop on its **Local tunnels** card only. On Windows, a `devtunnel host` started from an admin terminal is still recognised. Stopping it asks for administrator approval (UAC).
 - Shows forwarded ports (`localhost:L → :R`), with Copy SSH (uses your `~/.ssh/config` alias if one matches) and Open SSH (Terminal on macOS, Windows Terminal or cmd on Windows).
 - Recognises tunnels hosted on this device, by Tunnel Bar or another `devtunnel host`. Their **Remote connections** card says **This device** instead of offering Connect. It remembers the last host, so an offline tunnel shows "last hosted here".
@@ -27,7 +27,7 @@ A macOS menu-bar and Windows tray app for managing [Microsoft Dev Tunnels](https
 ### Hosting
 
 - **Expose a local port**: creates a tunnel labelled `tunnelbar`, adds the port (http/https/auto), and hosts it from this machine. An optional Tunnel port can advertise a different number, such as `:2222 → localhost:22`.
-- **Host here** / **Stop hosting** for your own tunnels, with optional **Auto-host** on launch and auto-restart.
+- **Host here** / **Stop hosting** for your own tunnels, with optional **Auto-host** on launch and auto-restart. Auto-host is disabled, with a tooltip saying why, while another process or device hosts the tunnel or it isn't on your account.
 - Shows each hosted port's public URL (open/copy) and Inspect link, and warns when nothing is listening locally.
 - Access control: private (your account) by default; **Make public…** adds anonymous access after confirmation; **Require sign-in** removes it.
 - Delete tunnels after inline confirmation. Tunnels hosted by another machine require a separate, deliberate override; hosting them here stays disabled.
