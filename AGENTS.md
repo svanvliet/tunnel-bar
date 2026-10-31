@@ -30,7 +30,8 @@ npx tauri build --bundles app   # -> src-tauri/target/release/bundle/macos/Tunne
 ```
 
 - Live tests run against the real devtunnel service and are `#[ignore]`: `cargo test live_manage -- --ignored --nocapture`. They may only create, modify or delete tunnels named `tunnelbar-test-*`. Never touch the user's other tunnels.
-- Windows is built on `windows-latest` in `.github/workflows/ci.yml`. Real PC testing is done by the user.
+- **Validate locally; don't spend GitHub Actions minutes.** CI (`.github/workflows/ci.yml`) is manual-only (`workflow_dispatch`). Don't add push or PR triggers, and don't run it unless the user asks.
+- Windows code is checked on the Mac by cross-target clippy (`rustup target add x86_64-pc-windows-msvc`, then `cargo clippy --target x86_64-pc-windows-msvc`). The real Windows build and testing happen on the user's PC.
 
 ## Installing a local build (macOS)
 

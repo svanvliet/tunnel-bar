@@ -1,8 +1,7 @@
 name: CI
+# Manual only, to conserve Actions minutes. Validate locally (see AGENTS.md).
 on:
-  push:
-    branches: [main]
-  pull_request:
+  workflow_dispatch:
 jobs:
   build:
     runs-on: macos-latest
