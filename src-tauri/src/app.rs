@@ -7,7 +7,7 @@ use crate::model::*;
 use crate::supervisor::{SupEvent, Supervisor};
 use crate::pin::Pins;
 use crate::{cli, login, settings};
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -44,6 +44,9 @@ pub struct AppState {
     refresh_lock: tokio::sync::Mutex<()>,
     /// Stable-port proxies for connected tunnels.
     pub pins: Pins,
+    /// Hosting port-map proxies: 127.0.0.1:<tunnel port> -> localhost:<local port> while this Mac hosts.
+    pub host_maps: Pins,
+    host_map_targets: Arc<Mutex<HashMap<(String, u16), u16>>>,
     pub login: Mutex<Option<LoginState>>,
     login_cancel: Mutex<Option<Arc<tokio::sync::Notify>>>,
     /// PID (= process group) of the running `devtunnel user login`, so quitting can stop it synchronously.
@@ -107,9 +110,15 @@ impl AppState {
             let resolve: crate::pin::Resolver = Arc::new(move |id, remote| {
                 sup2.state(id).1.iter().find(|f| f.remote_port == remote).map(|f| f.local_port)
             });
+            let host_map_targets: Arc<Mutex<HashMap<(String, u16), u16>>> = Default::default();
+            let targets = host_map_targets.clone();
+            let map_resolve: crate::pin::Resolver =
+                Arc::new(move |id, remote| targets.lock().unwrap().get(&(id.to_string(), remote)).copied());
             AppState {
                 app: app.clone(),
                 pins: Pins::new(resolve),
+                host_maps: Pins::new(map_resolve),
+                host_map_targets,
                 login: Mutex::new(None),
                 login_cancel: Mutex::new(None),
                 login_pid: Default::default(),
@@ -153,7 +162,11 @@ impl AppState {
             .map(|id| {
                 let summary = cache.summaries.iter().find(|s| &s.tunnel_id == id).cloned();
                 let details = cache.details.get(id);
-                let ports = details.map(|d| d.ports.clone()).unwrap_or_default();
+                let host_map = settings.tunnels.get(id).map(|t| t.host_port_map.clone()).unwrap_or_default();
+                let mut ports = details.map(|d| d.ports.clone()).unwrap_or_default();
+                for p in &mut ports {
+                    p.local_port = host_map.get(&p.port_number).copied();
+                }
                 let (mut state, mut forwards) = self.supervisor.state(id);
                 if !self.supervisor.is_active(id) && matches!(state, ConnState::Disconnected)
                     && let Some((ext, lports)) = externals.iter().find(|(e, _)| e.role == Role::Connect && external::matches_tunnel(&e.tunnel_arg, id)) {
@@ -171,7 +184,8 @@ impl AppState {
                     host_state = ConnState::External { pid: ext.pid };
                 }
                 let hosted_ports = if hosting_here || matches!(host_state, ConnState::External { .. }) {
-                    hosted_ports(&ports, &host_fwd, &cache.listening)
+                    let map = if hosting_here { host_map.clone() } else { Default::default() };
+                    hosted_ports(&ports, &host_fwd, &cache.listening, &map)
                 } else {
                     vec![]
                 };
@@ -190,6 +204,13 @@ impl AppState {
                         &settings.label_filter,
                     ),
                     pins: tunnel_settings.pinned_ports.iter().map(|(&r, &l)| self.pins.view(id, r, l)).collect(),
+                    port_maps: host_map
+                        .iter()
+                        .map(|(&r, &l)| {
+                            let v = self.host_maps.view(id, r, r);
+                            PortMapView { remote_port: r, local_port: l, listening: v.listening, error: v.error }
+                        })
+                        .collect(),
                     access_rules: details.map(|d| d.access_control.clone()).unwrap_or_default(),
                     host_state,
                     hosted_ports,
@@ -255,6 +276,7 @@ impl AppState {
                 self.publish();
             }
             SupEvent::Changed { role: Role::Host, id, prev, next } => {
+                self.sync_host_maps(None);
                 self.handle_host_transition(&id, &prev, &next);
                 self.publish();
             }
@@ -426,6 +448,10 @@ impl AppState {
 
     /// Checks which hosted ports have a local server, so the UI can warn about "nothing listening".
     fn probe_hosted_ports(&self) -> HashSet<u16> {
+        let maps: HashMap<String, BTreeMap<u16, u16>> = {
+            let s = self.settings.lock().unwrap();
+            s.tunnels.iter().filter(|(_, t)| !t.host_port_map.is_empty()).map(|(id, t)| (id.clone(), t.host_port_map.clone())).collect()
+        };
         let ports: HashSet<u16> = {
             let c = self.cache.lock().unwrap();
             self.hoster
@@ -434,7 +460,9 @@ impl AppState {
                 .flat_map(|id| {
                     let mut p: Vec<u16> = self.hoster.state(id).1.iter().map(|f| f.remote_port).collect();
                     p.extend(c.details.get(id).map(|d| d.ports.iter().map(|x| x.port_number).collect::<Vec<_>>()).unwrap_or_default());
-                    p
+                    // Mapped ports: probe the real server, not our own proxy.
+                    let map = maps.get(id);
+                    p.into_iter().map(|n| map.and_then(|m| m.get(&n).copied()).unwrap_or(n)).collect::<Vec<_>>()
                 })
                 .collect()
         };
@@ -476,6 +504,70 @@ impl AppState {
                 .collect()
         };
         self.pins.sync(&wanted);
+    }
+
+    /// Runs hosting port-map proxies for every tunnel this Mac hosts (plus `starting`).
+    pub fn sync_host_maps(&self, starting: Option<&str>) {
+        let wanted: Vec<(String, u16, u16)> = {
+            let s = self.settings.lock().unwrap();
+            s.tunnels
+                .iter()
+                .filter(|(id, _)| {
+                    starting == Some(id.as_str())
+                        || (self.hoster.is_active(id) && !matches!(self.hoster.state(id).0, ConnState::AuthRequired { .. }))
+                })
+                .flat_map(|(id, t)| t.host_port_map.iter().map(move |(&r, &l)| (id.clone(), r, l)))
+                .collect()
+        };
+        *self.host_map_targets.lock().unwrap() = wanted.iter().map(|(id, r, l)| ((id.clone(), *r), *l)).collect();
+        let entries: Vec<(String, u16, u16)> = wanted.into_iter().map(|(id, r, _)| (id, r, r)).collect();
+        self.host_maps.sync(&entries);
+    }
+
+    /// Refuses a mapped tunnel port that something else already listens on locally (our own map proxy excepted),
+    /// since `devtunnel host` would reach that server instead of the mapped one.
+    fn check_map_port_free(&self, id: &str, remote: u16) -> Result<(), String> {
+        if self.host_maps.view(id, remote, remote).listening {
+            return Ok(());
+        }
+        match crate::pin::port_in_use(remote) {
+            Some(addr) => Err(format!(
+                "Port {remote} is already in use on this Mac ({addr}), so it can't forward to another local port. Choose a different tunnel port."
+            )),
+            None => Ok(()),
+        }
+    }
+
+    /// Maps tunnel port `remote` to local server port `local` for hosting (None or local == remote clears it).
+    /// Restarts our host so the proxy and published ports agree.
+    pub async fn set_port_map(self: &Arc<Self>, id: &str, remote: u16, local: Option<u16>) -> Result<(), String> {
+        if remote == 0 || local == Some(0) {
+            return Err("Ports must be between 1 and 65535.".into());
+        }
+        let local = local.filter(|&l| l != remote);
+        if local.is_some() {
+            self.check_map_port_free(id, remote)?;
+        }
+        {
+            let mut s = self.settings.lock().unwrap();
+            let t = s.tunnels.entry(id.to_string()).or_default();
+            match local {
+                Some(l) => t.host_port_map.insert(remote, l),
+                None => t.host_port_map.remove(&remote),
+            };
+        }
+        self.save_settings()?;
+        self.sync_host_maps(None);
+        self.logs.push(
+            id,
+            "app",
+            &match local {
+                Some(l) => format!("Tunnel port {remote} now forwards to localhost:{l} while hosted here"),
+                None => format!("Tunnel port {remote} forwards to localhost:{remote} again"),
+            },
+        );
+        self.publish();
+        Ok(())
     }
 
     /// Sets (local Some) or clears (None) the stable local port for one remote port.
@@ -550,6 +642,12 @@ impl AppState {
             return Err("This tunnel is already hosted by another machine. Hosting it here too would split its traffic.".into());
         }
         let cli = self.cli_path().await.ok_or("devtunnel CLI not found")?;
+        let mapped: Vec<u16> = self.settings.lock().unwrap().tunnels.get(id).map(|t| t.host_port_map.keys().copied().collect()).unwrap_or_default();
+        for r in mapped {
+            self.check_map_port_free(id, r)?;
+        }
+        // Start the map proxies before `devtunnel host` so its first connections reach the mapped servers.
+        self.sync_host_maps(Some(id));
         self.hoster.connect(id, cli);
         Ok(())
     }
@@ -616,15 +714,22 @@ impl AppState {
             }
         }
         let expiration = req.expiration.as_deref().filter(|e| !e.trim().is_empty()).map(normalize_expiration).transpose()?;
+        // (tunnel port, protocol, headers) plus tunnel port -> local port maps.
         let mut ports: Vec<(u16, &'static str, HeaderOptions)> = Vec::new();
+        let mut port_map: BTreeMap<u16, u16> = BTreeMap::new();
         for p in &req.ports {
-            if p.port == 0 {
+            let remote = p.remote_port.unwrap_or(p.port);
+            if p.port == 0 || remote == 0 {
                 return Err("Ports must be between 1 and 65535.".into());
             }
-            if ports.iter().any(|(n, _, _)| *n == p.port) {
-                return Err(format!("Port {} is listed twice.", p.port));
+            if ports.iter().any(|(n, _, _)| *n == remote) {
+                return Err(format!("Port {remote} is listed twice."));
             }
-            ports.push((p.port, validate_protocol(&p.protocol)?, p.headers.normalized()?));
+            if remote != p.port {
+                self.check_map_port_free("", remote)?;
+                port_map.insert(remote, p.port);
+            }
+            ports.push((remote, validate_protocol(&p.protocol)?, p.headers.normalized()?));
         }
         if req.host && ports.is_empty() {
             return Err("Add at least one port to host this tunnel.".into());
@@ -663,12 +768,21 @@ impl AppState {
             let _ = cli::delete(&cli, &id).await;
             return Err(e);
         }
-        if let Some(n) = req.nickname.as_deref().map(str::trim).filter(|n| !n.is_empty()) {
-            self.settings.lock().unwrap().tunnels.entry(id.clone()).or_default().nickname = Some(n.to_string());
+        let nickname = req.nickname.as_deref().map(str::trim).filter(|n| !n.is_empty());
+        if nickname.is_some() || !port_map.is_empty() {
+            {
+                let mut s = self.settings.lock().unwrap();
+                let t = s.tunnels.entry(id.clone()).or_default();
+                if let Some(n) = nickname {
+                    t.nickname = Some(n.to_string());
+                }
+                t.host_port_map = port_map;
+            }
             self.save_settings()?;
         }
         self.refresh().await;
         if req.host {
+            self.sync_host_maps(Some(&id));
             self.hoster.connect(&id, cli);
         }
         // The service can lag on new tunnels/access rules; re-read once it settles.
@@ -743,23 +857,39 @@ impl AppState {
         Ok(())
     }
 
+    /// Adds tunnel port `remote_port` (default: `port`). When it differs, hosting here forwards it to
+    /// localhost:`port` through a loopback proxy (see `set_port_map`).
+    #[allow(clippy::too_many_arguments)]
     pub async fn add_port(
         self: &Arc<Self>,
         id: &str,
         port: u16,
+        remote_port: Option<u16>,
         protocol: &str,
         headers: &HeaderOptions,
         allow_hosted_elsewhere: bool,
     ) -> Result<(), String> {
-        if port == 0 {
+        let local = port;
+        let port = remote_port.unwrap_or(local);
+        if port == 0 || local == 0 {
             return Err("Enter a port between 1 and 65535.".into());
         }
         let protocol = validate_protocol(protocol)?;
         let headers = headers.normalized()?;
         self.check_port_change(id, allow_hosted_elsewhere)?;
+        if port != local {
+            self.check_map_port_free(id, port)?;
+        }
         let cli = self.cli_path().await.ok_or("devtunnel CLI not found")?;
         cli::port_create(&cli, id, port, protocol, &headers).await?;
-        self.logs.push(id, "app", &format!("Added port {port} ({protocol})"));
+        if port != local {
+            self.settings.lock().unwrap().tunnels.entry(id.to_string()).or_default().host_port_map.insert(port, local);
+            self.save_settings()?;
+            self.sync_host_maps(None);
+            self.logs.push(id, "app", &format!("Added port {port} ({protocol}) -> localhost:{local}"));
+        } else {
+            self.logs.push(id, "app", &format!("Added port {port} ({protocol})"));
+        }
         {
             let mut c = self.cache.lock().unwrap();
             if let Some(d) = c.details.get_mut(id).filter(|d| !d.ports.iter().any(|p| p.port_number == port)) {
@@ -768,6 +898,7 @@ impl AppState {
                     protocol: protocol.into(),
                     host_header: headers.host_header.clone(),
                     origin_header: headers.origin_header.clone(),
+                    local_port: (port != local).then_some(local),
                     ..Default::default()
                 });
                 d.ports.sort_by_key(|p| p.port_number);
@@ -805,11 +936,14 @@ impl AppState {
             if let Some(s) = c.summaries.iter_mut().find(|s| s.tunnel_id == id) {
                 s.port_count = s.port_count.saturating_sub(1);
             }
-            self.settings.lock().unwrap().tunnels.get_mut(id).and_then(|t| t.pinned_ports.remove(&port)).is_some()
+            let mut s = self.settings.lock().unwrap();
+            let t = s.tunnels.get_mut(id);
+            t.map(|t| (t.pinned_ports.remove(&port).is_some(), t.host_port_map.remove(&port).is_some())).unwrap_or_default()
         };
-        if pinned {
+        if pinned.0 || pinned.1 {
             self.save_settings()?;
             self.sync_pins(None);
+            self.sync_host_maps(None);
         }
         self.publish();
         self.restart_host_if_running(id, cli).await;
@@ -898,9 +1032,11 @@ impl AppState {
     }
 
     /// Creates a Tunnel Bar-labelled tunnel for localhost:port and starts hosting it.
+    #[allow(clippy::too_many_arguments)]
     pub async fn expose(
         self: &Arc<Self>,
         port: u16,
+        remote_port: Option<u16>,
         protocol: &str,
         anonymous: bool,
         name: Option<&str>,
@@ -916,7 +1052,7 @@ impl AppState {
         self.create_tunnel(CreateTunnelRequest {
             tunnel_id: name.map(str::to_string),
             description: format!("localhost:{port} exposed by Tunnel Bar"),
-            ports: vec![PortSpec { port, protocol: protocol.into(), headers: Default::default() }],
+            ports: vec![PortSpec { port, remote_port, protocol: protocol.into(), headers: Default::default() }],
             anonymous,
             headers,
             access_rules,
@@ -977,6 +1113,7 @@ impl AppState {
         self.settings.lock().unwrap().tunnels.remove(id);
         self.save_settings()?;
         self.sync_pins(None);
+        self.sync_host_maps(None);
         self.logs.push(id, "app", "Tunnel deleted");
         {
             let mut c = self.cache.lock().unwrap();
@@ -1067,6 +1204,7 @@ impl AppState {
         self.supervisor.shutdown();
         let _ = t.join();
         self.pins.stop_all();
+        self.host_maps.stop_all();
         // The login task won't get to run before the process exits; stop its CLI now.
         login::stop(&self.login_pid);
         self.cancel_login();
@@ -1201,7 +1339,7 @@ pub fn state(app: &AppHandle) -> Shared {
     app.state::<Shared>().inner().clone()
 }
 
-fn hosted_ports(ports: &[TunnelPort], live: &[Forward], listening: &HashSet<u16>) -> Vec<HostedPort> {
+fn hosted_ports(ports: &[TunnelPort], live: &[Forward], listening: &HashSet<u16>, map: &BTreeMap<u16, u16>) -> Vec<HostedPort> {
     let mut nums: Vec<u16> = ports.iter().map(|p| p.port_number).collect();
     nums.extend(live.iter().map(|f| f.remote_port));
     nums.sort();
@@ -1210,12 +1348,14 @@ fn hosted_ports(ports: &[TunnelPort], live: &[Forward], listening: &HashSet<u16>
         .map(|n| {
             let p = ports.iter().find(|p| p.port_number == n);
             let uri = p.map(|p| p.port_uri.clone()).unwrap_or_default();
+            let local = map.get(&n).copied().unwrap_or(n);
             HostedPort {
                 port: n,
+                local_port: local,
                 protocol: p.map(|p| p.protocol.clone()).unwrap_or_default(),
                 inspect_uri: inspect_uri(&uri),
                 uri,
-                listening: listening.contains(&n),
+                listening: listening.contains(&local),
             }
         })
         .collect()
@@ -1236,6 +1376,21 @@ mod tests {
 
     fn pf(created_by_app: bool, hosted_elsewhere: bool) -> DeletePreflight {
         DeletePreflight { created_by_app, needs_confirm: !created_by_app, hosted_elsewhere, hosting_here: false, connected_here: false }
+    }
+
+    #[test]
+    fn hosted_ports_report_mapped_local_server() {
+        let ports = vec![
+            TunnelPort { port_number: 2222, protocol: "auto".into(), ..Default::default() },
+            TunnelPort { port_number: 3000, protocol: "http".into(), ..Default::default() },
+        ];
+        let map = BTreeMap::from([(2222, 22)]);
+        // Only localhost:22 is up; 2222 is merely our proxy and doesn't count.
+        let h = hosted_ports(&ports, &[], &HashSet::from([22]), &map);
+        assert_eq!((h[0].port, h[0].local_port, h[0].listening), (2222, 22, true));
+        assert_eq!((h[1].port, h[1].local_port, h[1].listening), (3000, 3000, false));
+        let h = hosted_ports(&ports, &[], &HashSet::from([2222]), &map);
+        assert!(!h[0].listening);
     }
 
     #[test]

@@ -35,6 +35,7 @@ A macOS menu-bar app for managing [Microsoft Dev Tunnels](https://learn.microsof
 - Add and remove ports. Tunnel Bar restarts its host so the change takes effect.
 - Access rules beyond public: your Entra tenant, a GitHub organization (needs a GitHub sign-in) or a repository, as allow or deny rules with an optional expiration, on the tunnel or a single port. Changing rules on a tunnel Tunnel Bar didn't create needs confirmation.
 - Host/Origin header rewriting per tunnel or port, including `unchanged` for dev servers like Vite and Next.js.
+- **Port mapping when hosting**: advertise a different tunnel port than the local one (e.g. 2222 → `localhost:22`). `devtunnel host` can't do this itself, so Tunnel Bar runs a loopback proxy on the tunnel port while it hosts.
 - Delete tunnels.
   - Deleting a tunnel Tunnel Bar didn't create needs explicit confirmation.
   - A tunnel hosted by another machine also needs a separate override.

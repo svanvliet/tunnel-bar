@@ -27,6 +27,9 @@ pub struct TunnelPort {
     pub host_header: Option<String>,
     /// Effective Origin header rewrite; None = service default ("http(s)://localhost").
     pub origin_header: Option<String>,
+    /// Local server port when this tunnel port is mapped (`TunnelSettings.host_port_map`); None = same number.
+    #[serde(skip_deserializing)]
+    pub local_port: Option<u16>,
 }
 
 impl TunnelPort {
@@ -161,6 +164,9 @@ pub struct TunnelSettings {
     pub ssh_host: Option<String>,
     /// Stable local ports: remote port -> local port served by Tunnel Bar's proxy while connected.
     pub pinned_ports: BTreeMap<u16, u16>,
+    /// Hosting: tunnel port -> local server port. While this Mac hosts the tunnel, a loopback proxy on
+    /// 127.0.0.1:<tunnel port> forwards to localhost:<local port>. Change via `set_port_map`.
+    pub host_port_map: BTreeMap<u16, u16>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -228,6 +234,8 @@ pub struct TunnelView {
     pub pins: Vec<PinView>,
     /// Tunnel-level access rules (with `index` for `remove_access_rule`); empty until details load.
     pub access_rules: Vec<AccessEntry>,
+    /// Hosting port maps (tunnel port != local port).
+    pub port_maps: Vec<PortMapView>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
@@ -242,10 +250,26 @@ pub struct PinView {
     pub error: Option<String>,
 }
 
+/// A hosting port map's proxy status (see `TunnelSettings.host_port_map`).
+#[derive(Debug, Clone, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct PortMapView {
+    /// Tunnel port (what clients see); the proxy listens on 127.0.0.1/::1 at this number.
+    pub remote_port: u16,
+    /// Local server port the proxy forwards to.
+    pub local_port: u16,
+    /// The proxy is listening (only while this Mac hosts the tunnel).
+    pub listening: bool,
+    pub error: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
 #[serde(rename_all = "camelCase", default)]
 pub struct PortSpec {
+    /// Local server port (also the tunnel port unless `remote_port` is set).
     pub port: u16,
+    /// Tunnel port to advertise instead of `port` (e.g. 2222 for a local SSH server on 22).
+    pub remote_port: Option<u16>,
     /// "http", "https" or "auto" (default).
     pub protocol: String,
     /// Per-port header rewriting; unset fields inherit the tunnel's.
@@ -407,7 +431,9 @@ pub struct HostedPort {
     pub protocol: String,
     pub uri: String,
     pub inspect_uri: String,
-    /// Something is accepting connections on localhost:port.
+    /// Local server port the host reaches (differs from `port` when mapped).
+    pub local_port: u16,
+    /// Something is accepting connections on localhost:local_port.
     pub listening: bool,
 }
 
@@ -582,6 +608,13 @@ mod tests {
         let s: Settings = serde_json::from_str(r#"{"hotkey":null,"tunnels":{"a":{"pinnedPorts":{"2222":2222}}}}"#).unwrap();
         assert_eq!(s.hotkey, None);
         assert_eq!(s.tunnels["a"].pinned_ports[&2222], 2222);
+        assert!(s.tunnels["a"].host_port_map.is_empty());
+        let s: Settings = serde_json::from_str(r#"{"tunnels":{"a":{"hostPortMap":{"2222":22}}}}"#).unwrap();
+        assert_eq!(s.tunnels["a"].host_port_map[&2222], 22);
+        assert!(serde_json::to_string(&s).unwrap().contains(r#""hostPortMap":{"2222":22}"#));
+        // localPort is ours, never read from the CLI.
+        let p: TunnelPort = serde_json::from_str(r#"{"portNumber":2222,"localPort":22}"#).unwrap();
+        assert_eq!(p.local_port, None);
     }
 
     #[test]

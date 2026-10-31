@@ -66,7 +66,7 @@ mod tests {
         let mut s = Settings::default();
         s.tunnels.insert(
             "a.usw3".into(),
-            TunnelSettings { nickname: Some("Dev".into()), auto_connect: true, auto_host: true, ssh_host: None, pinned_ports: Default::default() },
+            TunnelSettings { nickname: Some("Dev".into()), auto_connect: true, auto_host: true, ssh_host: None, pinned_ports: Default::default(), host_port_map: Default::default() },
         );
         save_to(&p, &s).unwrap();
         assert_eq!(load_from(&p), s);

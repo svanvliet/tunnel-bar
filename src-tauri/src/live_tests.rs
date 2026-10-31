@@ -190,3 +190,53 @@ fn live_manage_lifecycle_and_pin() {
 
     rt.block_on(cli::delete(&cli, &id)).unwrap();
 }
+
+#[test]
+#[ignore]
+fn live_manage_host_port_map() {
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let cli = rt.block_on(cli::find_cli(None)).expect("devtunnel CLI");
+    let nonce = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis() % 1_000_000_000;
+    let name = format!("{PREFIX}map-{nonce}");
+    let id = rt.block_on(cli::create(&cli, Some(&name), &["tunnelbar"], "port map live", Some("1h"), &Default::default())).unwrap();
+    let _guard = TempTunnel { cli: cli.clone(), id: id.clone() };
+
+    // The real server is on `local`; the tunnel advertises a different `remote` port.
+    let local = http_server("tunnelbar-map-ok");
+    let remote = free_port();
+    assert_ne!(local, remote);
+    assert_eq!(crate::pin::port_in_use(remote), None);
+    rt.block_on(cli::port_create(&cli, &id, remote, "http", &Default::default())).unwrap();
+
+    // Host-side proxy, as AppState::sync_host_maps runs it: listen on the tunnel port, forward to local.
+    let id2 = id.clone();
+    let maps = Pins::new(Arc::new(move |tid: &str, r: u16| (tid == id2 && r == remote).then_some(local)));
+    maps.sync(&[(id.clone(), remote, remote)]);
+    assert!(wait(|| maps.view(&id, remote, remote).listening), "map proxy listening");
+
+    let dir = tempfile::tempdir().unwrap();
+    let logs = Arc::new(LogStore::new(dir.path().join("logs")));
+    let host = Supervisor::with_role(Role::Host, logs.clone(), Arc::new(|_| {}));
+    host.connect(&id, cli.clone());
+    assert!(wait(|| host.state(&id).0 == ConnState::Connected && !host.state(&id).1.is_empty()), "hosted");
+    std::thread::sleep(Duration::from_secs(2));
+
+    let client = Supervisor::new(logs, Arc::new(|_| {}));
+    client.connect(&id, cli.clone());
+    assert!(wait(|| client.state(&id).1.iter().any(|f| f.remote_port == remote)), "client forwarding");
+    let via = client.state(&id).1.iter().find(|f| f.remote_port == remote).unwrap().local_port;
+    eprintln!("local server={local} tunnel port={remote} client forward={via}");
+    assert_ne!(via, local);
+    let body = get(via);
+    eprintln!("response head={:?}", body.lines().next());
+    assert!(body.contains("tunnelbar-map-ok"), "HTTP through tunnel port {remote} -> localhost:{local}: {body:?}");
+
+    let pids = [host.managed_pids(), client.managed_pids()].concat();
+    client.disconnect(&id);
+    host.disconnect(&id);
+    maps.stop_all();
+    assert!(wait(|| host.state(&id).0 == ConnState::Disconnected));
+    std::thread::sleep(Duration::from_millis(500));
+    assert!(pids.iter().all(|&p| !crate::supervisor::alive(p)));
+    rt.block_on(cli::delete(&cli, &id)).unwrap();
+}
