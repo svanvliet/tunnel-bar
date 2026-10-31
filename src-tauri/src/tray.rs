@@ -10,9 +10,29 @@ use tauri_plugin_positioner::{Position, WindowExt};
 
 const TRAY_ID: &str = "main";
 static LAST: Mutex<Option<(TrayState, String)>> = Mutex::new(None);
+/// Taskbar theme the current Windows icon was drawn for.
+static LIGHT_TASKBAR: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 fn image(state: TrayState) -> Image<'static> {
-    icon::image(state)
+    icon::image(state, LIGHT_TASKBAR.load(std::sync::atomic::Ordering::Relaxed))
+}
+
+/// Redraws the tray icon in the other ink colour when the Windows taskbar switches between light and dark.
+#[cfg(windows)]
+pub fn watch_taskbar_theme(app: &AppHandle) {
+    use std::sync::atomic::Ordering;
+    LIGHT_TASKBAR.store(crate::win::taskbar_is_light(), Ordering::Relaxed);
+    let app = app.clone();
+    std::thread::spawn(move || loop {
+        std::thread::sleep(std::time::Duration::from_secs(2));
+        let light = crate::win::taskbar_is_light();
+        if LIGHT_TASKBAR.swap(light, Ordering::Relaxed) != light {
+            let state = LAST.lock().unwrap().as_ref().map(|(s, _)| *s).unwrap_or(TrayState::Idle);
+            if let Some(tray) = app.tray_by_id(TRAY_ID) {
+                let _ = tray.set_icon(Some(image(state)));
+            }
+        }
+    });
 }
 
 pub fn create(app: &AppHandle) -> tauri::Result<()> {
@@ -195,8 +215,26 @@ fn position_flyout(app: &AppHandle, w: &tauri::WebviewWindow) {
     let wa = monitor.work_area();
     let work = Rect { x: wa.position.x, y: wa.position.y, w: wa.size.width as i32, h: wa.size.height as i32 };
     let margin = (12.0 * monitor.scale_factor()) as i32;
-    let (x, y) = flyout_position(tray, (size.width as i32, size.height as i32), mr, work, margin);
+    // outer_size is in the DPI of the monitor the window is on now; Windows rescales it on arrival.
+    let predicted = scale_size((size.width, size.height), w.scale_factor().unwrap_or(1.0), monitor.scale_factor());
+    let (x, y) = flyout_position(tray, predicted, mr, work, margin);
     let _ = w.set_position(tauri::PhysicalPosition::new(x, y));
+    // Rounding or a DPI change Windows applied differently: place it again with the size it actually has now.
+    if let Ok(actual) = w.outer_size() {
+        let actual = (actual.width as i32, actual.height as i32);
+        if actual != predicted {
+            let (x, y) = flyout_position(tray, actual, mr, work, margin);
+            let _ = w.set_position(tauri::PhysicalPosition::new(x, y));
+        }
+    }
+}
+
+/// Converts a physical size from one monitor scale factor to another (via logical pixels).
+#[cfg_attr(not(windows), allow(dead_code))]
+fn scale_size(size: (u32, u32), from: f64, to: f64) -> (i32, i32) {
+    let from = if from > 0.0 { from } else { 1.0 };
+    let conv = |v: u32| (v as f64 / from * to).round() as i32;
+    (conv(size.0), conv(size.1))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -302,5 +340,21 @@ mod tests {
         // Auto-hide bottom taskbar: work area == monitor, infer the edge from the tray.
         let tray = Rect { x: 1700, y: 1060, w: 20, h: 20 };
         assert_eq!(flyout_position(tray, win, MON, MON, 12).1, 1080 - 580 - 12);
+    }
+
+    #[test]
+    fn flyout_size_follows_the_target_monitor_scale() {
+        // 400x580 logical: 600x870 on a 150% monitor becomes 400x580 at 100% and 800x1160 at 200%.
+        assert_eq!(scale_size((600, 870), 1.5, 1.0), (400, 580));
+        assert_eq!(scale_size((600, 870), 1.5, 2.0), (800, 1160));
+        assert_eq!(scale_size((400, 580), 1.0, 1.25), (500, 725));
+        assert_eq!(scale_size((400, 580), 1.0, 1.0), (400, 580));
+        assert_eq!(scale_size((400, 580), 0.0, 2.0), (800, 1160));
+        // Using the stale size on a 200% monitor would put the flyout's bottom 580px below where it fits.
+        let mon = Rect { x: 1920, y: 0, w: 3840, h: 2160 };
+        let work = Rect { x: 1920, y: 0, w: 3840, h: 2064 };
+        let tray = Rect { x: 5500, y: 2080, w: 64, h: 64 };
+        let (_, y) = flyout_position(tray, scale_size((400, 580), 1.0, 2.0), mon, work, 24);
+        assert_eq!(y + 1160, 2064 - 24);
     }
 }

@@ -507,6 +507,8 @@ pub struct Snapshot {
     pub login: Option<LoginState>,
     /// Why the global hotkey couldn't be registered.
     pub hotkey_error: Option<String>,
+    /// devtunnel is running as administrator and Tunnel Bar can't tell which tunnel it serves.
+    pub admin_devtunnel: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]

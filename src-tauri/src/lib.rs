@@ -78,6 +78,8 @@ pub fn run() {
                 });
             }
             #[cfg(windows)]
+            tray::watch_taskbar_theme(app.handle());
+            #[cfg(windows)]
             if let Err(e) = win::register_power_notifications() {
                 state.logs.push("_app", "app", &e);
             }

@@ -172,8 +172,8 @@
     const retryable = cmd === "connect" || cmd === "host";
     const titles: Record<TunnelAction, string> = {
       connect: "Couldn’t connect", disconnect: "Couldn’t disconnect", host: "Couldn’t start hosting",
-      stop_host: "Couldn’t stop hosting", adopt_external: "Couldn’t take over connection",
-      stop_external: "Couldn’t stop external connection", delete_tunnel: "Couldn’t delete tunnel",
+      stop_host: "Couldn’t stop hosting", adopt_external: "Couldn’t take over",
+      stop_external: "Couldn’t stop external devtunnel", delete_tunnel: "Couldn’t delete tunnel",
       set_anonymous: "Couldn’t change access",
     };
     const result = await perform(() => invoke(cmd, cmd === "set_anonymous" ? { id: t.id, allow, ...flags } : { id: t.id, ...flags }), titles[cmd], t.id,
@@ -310,6 +310,7 @@
           <LoginPanel login={snap.login} loggedIn={false} {account} busy={busy.includes("login")} onStart={startLogin} onCancel={cancelLogin} onLogout={logout} onFallback={openLogin} onCopy={(code) => clipboard(code, "Code copied", "Sign-in device code", "login-code")} onOpen={openUrl} />
         </div>
       {/if}
+      {#if snap?.adminDevtunnel}<div class="banner warning"><Icon name="warning" /><div><strong>devtunnel is running as administrator</strong><p>Tunnel Bar can’t tell which tunnel it serves. Stop it in that terminal to manage it here.</p></div></div>{/if}
       {#if snap?.refreshError}<div class="banner warning"><Icon name="warning" /><div><strong>Couldn’t refresh tunnels</strong><p class="selectable">{snap.refreshError}</p><button class="quiet" disabled={snap.refreshing} onclick={refresh}>Retry refresh</button></div></div>{/if}
       {#if remote.length}
         <div class="section-heading"><h2>Remote connections</h2><span>{remote.length}</span></div>

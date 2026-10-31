@@ -12,27 +12,33 @@ render(app, path.join(design, 'icon.png'), 1024);
 render(app, path.join(design, 'icon-128.png'), 128);
 render(app, path.join(design, '../static/favicon.png'), 32);
 
-for (const platform of ['macos', 'windows']) {
-  mkdirSync(path.join(icons, 'tray', platform), { recursive: true });
-  for (const state of ['disconnected', 'busy', 'connected', 'error']) {
-    let source = readFileSync(path.join(design, 'tray', `${state}.svg`), 'utf8');
-    if (platform === 'windows') {
-      // A white outer edge and black center remain visible on either taskbar theme.
-      source = source.replace('id="glyph"', 'id="glyph" filter="url(#outline)"')
-        .replace('</svg>', `<defs><filter id="outline" x="-25%" y="-25%" width="150%" height="150%">
-          <feMorphology in="SourceAlpha" operator="dilate" radius="3" result="edge"/>
-          <feFlood flood-color="#FFF"/>
-          <feComposite in2="edge" operator="in"/>
-          <feMerge><feMergeNode/><feMergeNode in="SourceGraphic"/></feMerge>
-        </filter></defs></svg>`);
-    }
-    if (platform === 'macos') {
-      // Crop the empty margins so the glyph matches the optical height of other menu bar items (22x18pt @2x).
-      source = source.replace('width="36" height="36" viewBox="0 0 100 100"', 'width="44" height="36" viewBox="-2 5 97.78 80"');
-      render(source, path.join(icons, 'tray', platform, `${state}.png`), 44, 36);
-    } else {
-      render(source, path.join(icons, 'tray', platform, `${state}.png`), 36);
-    }
+const states = ['disconnected', 'busy', 'connected', 'error'];
+const traySource = (state) => readFileSync(path.join(design, 'tray', `${state}.svg`), 'utf8');
+
+// macOS: template images (black ink + alpha), margins cropped so the glyph matches the optical height of
+// other menu bar items (22x18pt @2x).
+mkdirSync(path.join(icons, 'tray', 'macos'), { recursive: true });
+for (const state of states) {
+  const source = traySource(state)
+    .replace('width="36" height="36" viewBox="0 0 100 100"', 'width="44" height="36" viewBox="-2 5 97.78 80"');
+  render(source, path.join(icons, 'tray', 'macos', `${state}.png`), 44, 36);
+}
+
+// Windows: solid glyphs like the system tray icons, white for a dark taskbar and black for a light one.
+// Tight square crop and heavier strokes so the glyph holds up at 16px; 32px halves cleanly for 100% scale.
+for (const [theme, ink] of [['dark', '#FFF'], ['light', '#000']]) {
+  mkdirSync(path.join(icons, 'tray', 'windows', theme), { recursive: true });
+  for (const state of states) {
+    const source = traySource(state)
+      .replace('viewBox="0 0 100 100"', 'viewBox="-2 -3 98 98"')
+      .replaceAll('stroke-width="7"', 'stroke-width="10"')
+      .replaceAll('stroke-width="5"', 'stroke-width="7"')
+      .replace('stroke-dasharray="5 4.5"', 'stroke-dasharray="6 5"')
+      // The error badge's exclamation is a black mask stroke; keep it black so it still knocks out.
+      .replace('stroke="#000" stroke-width="4"', 'stroke="MASK" stroke-width="5.5"')
+      .replaceAll('#000"', `${ink}"`)
+      .replace('stroke="MASK"', 'stroke="#000"');
+    render(source, path.join(icons, 'tray', 'windows', theme, `${state}.png`), 32);
   }
 }
 const generated = mkdtempSync(path.join(icons, '.generated-'));

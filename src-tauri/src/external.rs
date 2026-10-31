@@ -63,13 +63,25 @@ pub fn matches_tunnel(arg: &str, tunnel_id: &str) -> bool {
 }
 
 pub fn scan(exclude_pids: &[u32]) -> Vec<ExternalConn> {
-    let Ok(mut sys) = System::new() else { return vec![] };
+    scan_all(exclude_pids).found
+}
+
+#[derive(Debug, Default)]
+pub struct ScanResult {
+    pub found: Vec<ExternalConn>,
+    /// devtunnel processes whose command line can't be read (on Windows: started from an elevated terminal).
+    pub opaque: Vec<u32>,
+}
+
+pub fn scan_all(exclude_pids: &[u32]) -> ScanResult {
+    let Ok(mut sys) = System::new() else { return ScanResult::default() };
     sys.refresh_processes_specifics(
         ProcessesToUpdate::All,
         true,
         ProcessRefreshKind::nothing().with_cmd(UpdateKind::Always),
     );
     let mut found = Vec::new();
+    let mut opaque = Vec::new();
     for (pid, p) in sys.processes() {
         let pid = pid.as_u32();
         if exclude_pids.contains(&pid) {
@@ -79,19 +91,55 @@ pub fn scan(exclude_pids: &[u32]) -> Vec<ExternalConn> {
         if p.parent().is_some_and(|pp| exclude_pids.contains(&pp.as_u32())) {
             continue;
         }
-        let args: Vec<String> = p.cmd().iter().map(|s| s.to_string_lossy().into_owned()).collect();
+        #[allow(unused_mut)]
+        let mut args: Vec<String> = p.cmd().iter().map(|s| s.to_string_lossy().into_owned()).collect();
+        // sysinfo reads the command line from the process's memory, which an elevated process denies us.
+        #[cfg(windows)]
+        if args.is_empty() && p.name().to_string_lossy().to_lowercase().starts_with("devtunnel") {
+            match crate::win::process_cmdline(pid) {
+                Some(a) => args = a,
+                None => {
+                    opaque.push(pid);
+                    continue;
+                }
+            }
+        }
         if let Some((role, tunnel_arg)) = parse_cmdline_role(&args) {
             found.push(ExternalConn { pid, role, tunnel_arg });
         }
     }
     // A wrapper and the real binary can both match; keep the parent only.
-    let pids: Vec<u32> = found.iter().map(|f| f.pid).collect();
-    found.retain(|f| {
-        let parent = sys.process(sysinfo::Pid::from_u32(f.pid)).and_then(|p| p.parent()).map(|p| p.as_u32());
-        !parent.is_some_and(|pp| pids.contains(&pp))
-    });
+    let pids: Vec<u32> = found.iter().map(|f| f.pid).chain(opaque.iter().copied()).collect();
+    let parent_listed = |pid: u32| {
+        let parent = sys.process(sysinfo::Pid::from_u32(pid)).and_then(|p| p.parent()).map(|p| p.as_u32());
+        parent.is_some_and(|pp| pids.contains(&pp))
+    };
+    found.retain(|f| !parent_listed(f.pid));
+    opaque.retain(|&p| !parent_listed(p));
     found.sort_by_key(|f| f.pid);
-    found
+    opaque.sort_unstable();
+    ScanResult { found, opaque }
+}
+
+#[derive(Debug, Default, PartialEq)]
+pub struct Attribution {
+    /// The unreadable process taken to be `devtunnel host <tunnel>`.
+    pub host: Option<ExternalConn>,
+    /// Unreadable devtunnel processes remain that couldn't be matched to a tunnel.
+    pub unexplained: bool,
+}
+
+/// Matches devtunnel processes we can't inspect to tunnels the service reports as hosted.
+/// `opaque` is (pid, has TCP listeners); `candidates` are tunnels with a host online that neither Tunnel Bar
+/// nor a readable external process hosts. `devtunnel host` dials out and never listens, so listening processes
+/// are clients (`connect`). Only a single host process with a single candidate tunnel is attributed.
+pub fn attribute_opaque(opaque: &[(u32, bool)], candidates: &[String]) -> Attribution {
+    let hosts: Vec<u32> = opaque.iter().filter(|(_, listening)| !listening).map(|(p, _)| *p).collect();
+    let host = match (hosts.as_slice(), candidates) {
+        ([pid], [id]) => Some(ExternalConn { pid: *pid, role: Role::Host, tunnel_arg: id.clone() }),
+        _ => None,
+    };
+    Attribution { unexplained: opaque.len() > host.is_some() as usize, host }
 }
 
 /// Best-effort list of local TCP listen ports for a process (and its children) via lsof.
@@ -224,5 +272,24 @@ mod tests {
             Some("x.usw3".into())
         );
         assert_eq!(parse_cmdline_role(&v(&["DevTunnel.EXE", "host", "y"])), Some((Role::Host, "y".into())));
+    }
+
+    #[test]
+    fn attributes_a_single_unreadable_host() {
+        let ids = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert_eq!(attribute_opaque(&[], &ids(&["a.usw3"])), Attribution::default());
+        let one = attribute_opaque(&[(42, false)], &ids(&["a.usw3"]));
+        assert_eq!(one.host, Some(ExternalConn { pid: 42, role: Role::Host, tunnel_arg: "a.usw3".into() }));
+        assert!(!one.unexplained);
+        // No tunnel is hosted without an owner we know of: nothing to attribute, but tell the user.
+        assert_eq!(attribute_opaque(&[(42, false)], &[]), Attribution { host: None, unexplained: true });
+        // Two candidate tunnels or two host processes: ambiguous.
+        assert_eq!(attribute_opaque(&[(42, false)], &ids(&["a.usw3", "b.usw3"])), Attribution { host: None, unexplained: true });
+        assert_eq!(attribute_opaque(&[(42, false), (43, false)], &ids(&["a.usw3"])), Attribution { host: None, unexplained: true });
+        // A listening process is an elevated `connect`, not the host.
+        assert_eq!(attribute_opaque(&[(42, true)], &ids(&["a.usw3"])), Attribution { host: None, unexplained: true });
+        let mixed = attribute_opaque(&[(42, true), (43, false)], &ids(&["a.usw3"]));
+        assert_eq!(mixed.host.map(|h| h.pid), Some(43));
+        assert!(mixed.unexplained);
     }
 }

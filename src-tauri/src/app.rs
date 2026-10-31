@@ -52,6 +52,8 @@ pub struct AppState {
     /// PID (= process group) of the running `devtunnel user login`, so quitting can stop it synchronously.
     login_pid: Arc<Mutex<Option<u32>>>,
     pub hotkey_error: Mutex<Option<String>>,
+    /// A devtunnel process we can't inspect (elevated) couldn't be matched to a tunnel.
+    pub admin_devtunnel: Mutex<bool>,
 }
 
 /// Why a delete must be refused, given what the caller acknowledged.
@@ -123,6 +125,7 @@ impl AppState {
                 login_cancel: Mutex::new(None),
                 login_pid: Default::default(),
                 hotkey_error: Mutex::new(None),
+                admin_devtunnel: Mutex::new(false),
                 supervisor,
                 hoster: Supervisor::with_role(Role::Host, logs.clone(), listener)
                     .with_pidfile(settings::hosts_pidfile_path()),
@@ -235,6 +238,7 @@ impl AppState {
             all_labels,
             login: self.login.lock().unwrap().clone(),
             hotkey_error: self.hotkey_error.lock().unwrap().clone(),
+            admin_devtunnel: *self.admin_devtunnel.lock().unwrap(),
             cli_path: cache.cli.as_ref().map(|p| p.display().to_string()),
             cli_version: cache.cli_version.clone(),
             auth: cache.auth.clone(),
@@ -430,7 +434,26 @@ impl AppState {
     pub fn scan_externals(&self) -> bool {
         let mut ours = self.supervisor.managed_pids();
         ours.extend(self.hoster.managed_pids());
-        let found = external::scan(&ours);
+        let scan = external::scan_all(&ours);
+        let mut found = scan.found;
+        let mut unexplained = false;
+        if !scan.opaque.is_empty() {
+            let opaque: Vec<(u32, bool)> = scan.opaque.iter().map(|&p| (p, !external::listen_ports(p).is_empty())).collect();
+            let candidates: Vec<String> = self
+                .cache
+                .lock()
+                .unwrap()
+                .summaries
+                .iter()
+                .filter(|s| s.host_connections > 0 && !self.hoster.is_active(&s.tunnel_id))
+                .filter(|s| !found.iter().any(|e| e.role == Role::Host && external::matches_tunnel(&e.tunnel_arg, &s.tunnel_id)))
+                .map(|s| s.tunnel_id.clone())
+                .collect();
+            let a = external::attribute_opaque(&opaque, &candidates);
+            found.extend(a.host);
+            unexplained = a.unexplained;
+        }
+        let notice_changed = std::mem::replace(&mut *self.admin_devtunnel.lock().unwrap(), unexplained) != unexplained;
         let with_ports: Vec<(ExternalConn, Vec<u16>)> =
             found.into_iter().map(|e| { let p = external::listen_ports(e.pid); (e, p) }).collect();
         let listening = self.probe_hosted_ports();
@@ -443,7 +466,7 @@ impl AppState {
             *cur = with_ports;
             true
         } else {
-            listening_changed
+            listening_changed || notice_changed
         }
     }
 
@@ -1211,15 +1234,33 @@ impl AppState {
         self.cancel_login();
     }
 
-    /// Stops an external `devtunnel connect` (signals only that PID, not its terminal's process group).
-    pub async fn stop_external(self: &Arc<Self>, id: &str) -> Result<(), String> {
-        let pid = self.external_pid(id).ok_or("No external connection found")?;
+    /// Stops an external `devtunnel connect`, or failing that `devtunnel host`, for this tunnel
+    /// (signals only that PID, not its terminal's process group). Returns the role that was stopped.
+    pub async fn stop_external(self: &Arc<Self>, id: &str) -> Result<Role, String> {
+        let (pid, role) = match self.external_pid(id) {
+            Some(p) => (p, Role::Connect),
+            None => (self.external_host_pid(id).ok_or("No external devtunnel process found")?, Role::Host),
+        };
         #[cfg(unix)]
         unsafe {
             libc::kill(pid as i32, libc::SIGTERM);
         }
         #[cfg(windows)]
-        crate::supervisor::signal_group(pid, true);
+        if crate::win::can_terminate(pid) {
+            crate::supervisor::signal_group(pid, true);
+        } else {
+            // Started from an elevated terminal: only an elevated taskkill can stop it.
+            let r = tauri::async_runtime::spawn_blocking(move || crate::win::kill_tree_elevated(pid))
+                .await
+                .map_err(|e| e.to_string())?;
+            if let Err(declined) = r {
+                return Err(if declined {
+                    "Started from an admin terminal \u{2014} stop it there to let Tunnel Bar manage it.".into()
+                } else {
+                    format!("Couldn't stop devtunnel (PID {pid}).")
+                });
+            }
+        }
         for _ in 0..30 {
             if !crate::supervisor::alive(pid) {
                 break;
@@ -1233,8 +1274,25 @@ impl AppState {
             }
             tokio::time::sleep(Duration::from_millis(300)).await;
         }
+        if role == Role::Host {
+            // The relay's host count lags; until it catches up the tunnel would look hosted elsewhere.
+            let _ = self.reload_summary_after_stop(id).await;
+        }
         self.scan_externals();
         self.publish();
+        Ok(role)
+    }
+
+    /// Waits briefly for the service to drop the stopped host, so taking over doesn't trip the "hosted elsewhere" guard.
+    async fn reload_summary_after_stop(&self, id: &str) -> Result<(), String> {
+        let cli = self.cli_path().await.ok_or("devtunnel CLI not found")?;
+        for _ in 0..10 {
+            self.reload_summary(&cli, id).await?;
+            if !self.hosted_elsewhere(id) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(500)).await;
+        }
         Ok(())
     }
 

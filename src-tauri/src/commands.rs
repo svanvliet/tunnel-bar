@@ -1,5 +1,5 @@
 use crate::app::Shared;
-use crate::model::{AccessEntry, AccessRuleRequest, CreateTunnelRequest, HeaderOptions, DeletePreflight, LogLine, LoginProvider, Snapshot, TunnelSettings, UpdateTunnelRequest};
+use crate::model::{Role, AccessEntry, AccessRuleRequest, CreateTunnelRequest, HeaderOptions, DeletePreflight, LogLine, LoginProvider, Snapshot, TunnelSettings, UpdateTunnelRequest};
 use crate::ssh;
 use tauri::{AppHandle, State};
 use tauri_plugin_autostart::ManagerExt;
@@ -195,15 +195,17 @@ pub fn set_hotkey(app: AppHandle, state: State<'_, Shared>, hotkey: Option<Strin
 
 #[tauri::command]
 pub async fn stop_external(state: State<'_, Shared>, id: String) -> Result<(), String> {
-    state.inner().clone().stop_external(&id).await
+    state.inner().clone().stop_external(&id).await.map(|_| ())
 }
 
-/// Stops an external connection and reconnects it under Tunnel Bar's management.
+/// Stops an external connection or host and restarts it under Tunnel Bar's management.
 #[tauri::command]
 pub async fn adopt_external(state: State<'_, Shared>, id: String) -> Result<(), String> {
     let s = state.inner().clone();
-    s.stop_external(&id).await?;
-    s.connect(&id).await
+    match s.stop_external(&id).await? {
+        Role::Connect => s.connect(&id).await,
+        Role::Host => s.host(&id).await,
+    }
 }
 
 #[tauri::command]

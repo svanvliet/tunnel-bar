@@ -252,8 +252,9 @@ impl Supervisor {
         cmd.args([self.role.subcommand(), id]).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).kill_on_drop(true);
         #[cfg(unix)]
         cmd.process_group(0);
+        // Start suspended so the child joins its Job Object before it can spawn anything (see below).
         #[cfg(windows)]
-        cmd.creation_flags(crate::win::CREATE_NO_WINDOW);
+        cmd.creation_flags(crate::win::CREATE_NO_WINDOW | crate::win::CREATE_SUSPENDED);
         let mut child = match cmd.spawn() {
             Ok(c) => c,
             Err(e) => {
@@ -264,10 +265,22 @@ impl Supervisor {
         };
         let pid = child.id();
         // Put the child in a kill-on-close Job Object so its whole tree dies with it, or with us if we crash.
+        // If that fails, stopping falls back to walking the process tree (signal_group -> kill_tree).
         #[cfg(windows)]
-        let _job = match pid.zip(child.raw_handle()) {
-            Some((p, h)) => crate::win::JobGuard::attach(p, h as _).map_err(|e| self.log(id, "app", &e)).ok(),
-            None => None,
+        let _job = {
+            let job = match pid.zip(child.raw_handle()) {
+                Some((p, h)) => crate::win::JobGuard::attach(p, h as _)
+                    .map_err(|e| self.log(id, "app", &format!("{e}; will stop by process tree instead")))
+                    .ok(),
+                None => None,
+            };
+            if let Err(e) = pid.ok_or_else(|| "no pid".to_string()).and_then(crate::win::resume_process) {
+                let msg = format!("failed to start devtunnel: {e}");
+                self.log(id, "app", &msg);
+                let _ = child.kill().await;
+                return RunEnd::SpawnFailed(msg);
+            }
+            job
         };
         {
             let mut m = self.inner.lock().unwrap();

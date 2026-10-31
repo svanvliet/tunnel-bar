@@ -1,4 +1,5 @@
-//! Workbench tray assets: 36px = 18pt at 2x on macOS.
+//! Workbench tray assets: 44x36 templates on macOS (22x18pt at 2x); on Windows 32px solid glyphs in a
+//! white set for dark taskbars and a black set for light ones.
 
 use std::sync::LazyLock;
 use tauri::image::Image;
@@ -17,34 +18,62 @@ impl TrayState {
     }
 }
 
-#[cfg(target_os = "windows")]
-const ASSETS: [&[u8]; 4] = [
-    include_bytes!("../icons/tray/windows/disconnected.png"),
-    include_bytes!("../icons/tray/windows/busy.png"),
-    include_bytes!("../icons/tray/windows/connected.png"),
-    include_bytes!("../icons/tray/windows/error.png"),
+const WINDOWS_DARK: [&[u8]; 4] = [
+    include_bytes!("../icons/tray/windows/dark/disconnected.png"),
+    include_bytes!("../icons/tray/windows/dark/busy.png"),
+    include_bytes!("../icons/tray/windows/dark/connected.png"),
+    include_bytes!("../icons/tray/windows/dark/error.png"),
 ];
 
-#[cfg(not(target_os = "windows"))]
-const ASSETS: [&[u8]; 4] = [
+const WINDOWS_LIGHT: [&[u8]; 4] = [
+    include_bytes!("../icons/tray/windows/light/disconnected.png"),
+    include_bytes!("../icons/tray/windows/light/busy.png"),
+    include_bytes!("../icons/tray/windows/light/connected.png"),
+    include_bytes!("../icons/tray/windows/light/error.png"),
+];
+
+const MACOS: [&[u8]; 4] = [
     include_bytes!("../icons/tray/macos/disconnected.png"),
     include_bytes!("../icons/tray/macos/busy.png"),
     include_bytes!("../icons/tray/macos/connected.png"),
     include_bytes!("../icons/tray/macos/error.png"),
 ];
 
-static IMAGES: LazyLock<[Image<'static>; 4]> = LazyLock::new(|| {
-    ASSETS.map(|bytes| Image::from_bytes(bytes).expect("embedded Workbench tray PNG must be valid"))
-});
+fn decode(assets: [&'static [u8]; 4]) -> [Image<'static>; 4] {
+    assets.map(|bytes| Image::from_bytes(bytes).expect("embedded Workbench tray PNG must be valid"))
+}
 
-pub fn image(state: TrayState) -> Image<'static> {
-    let index = match state {
+#[cfg_attr(target_os = "windows", allow(dead_code))]
+static MACOS_IMAGES: LazyLock<[Image<'static>; 4]> = LazyLock::new(|| decode(MACOS));
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+static DARK_IMAGES: LazyLock<[Image<'static>; 4]> = LazyLock::new(|| decode(WINDOWS_DARK));
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+static LIGHT_IMAGES: LazyLock<[Image<'static>; 4]> = LazyLock::new(|| decode(WINDOWS_LIGHT));
+
+fn index(state: TrayState) -> usize {
+    match state {
         TrayState::Idle => 0,
         TrayState::Busy => 1,
         TrayState::Connected => 2,
         TrayState::Problem => 3,
-    };
-    IMAGES[index].clone()
+    }
+}
+
+/// The Windows asset for a taskbar theme (`light_taskbar` picks black ink).
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+pub fn windows_image(state: TrayState, light_taskbar: bool) -> Image<'static> {
+    let set = if light_taskbar { &LIGHT_IMAGES } else { &DARK_IMAGES };
+    set[index(state)].clone()
+}
+
+/// `light_taskbar` is ignored on macOS, where the menu bar tints template images itself.
+pub fn image(state: TrayState, light_taskbar: bool) -> Image<'static> {
+    if cfg!(target_os = "windows") {
+        windows_image(state, light_taskbar)
+    } else {
+        let _ = light_taskbar;
+        MACOS_IMAGES[index(state)].clone()
+    }
 }
 
 #[cfg(test)]
@@ -60,18 +89,18 @@ mod tests {
             TrayState::Problem,
         ];
         for (i, state) in states.iter().enumerate() {
-            let icon = image(*state);
-            let width = if cfg!(target_os = "macos") { 44 } else { 36 };
-            assert_eq!((icon.width(), icon.height()), (width, 36));
-            assert_eq!(icon.rgba().len(), (width * 36 * 4) as usize);
+            let icon = image(*state, false);
+            let (width, height) = if cfg!(target_os = "windows") { (32, 32) } else { (44, 36) };
+            assert_eq!((icon.width(), icon.height()), (width, height));
+            assert_eq!(icon.rgba().len(), (width * height * 4) as usize);
             assert_eq!(state.is_template(), cfg!(target_os = "macos"));
             assert!(icon.rgba().chunks(4).any(|p| p[3] > 200));
             for other in &states[..i] {
-                assert_ne!(icon.rgba(), image(*other).rgba());
+                assert_ne!(icon.rgba(), image(*other, false).rgba());
             }
         }
         let alpha = |state| {
-            image(state)
+            image(state, false)
                 .rgba()
                 .chunks(4)
                 .map(|p| p[3] as u32)
@@ -103,22 +132,24 @@ mod tests {
     }
 
     #[test]
-    fn windows_assets_have_dark_ink_and_a_light_edge_for_both_themes() {
-        for bytes in [
-            include_bytes!("../icons/tray/windows/disconnected.png").as_slice(),
-            include_bytes!("../icons/tray/windows/busy.png").as_slice(),
-            include_bytes!("../icons/tray/windows/connected.png").as_slice(),
-            include_bytes!("../icons/tray/windows/error.png").as_slice(),
-        ] {
-            let icon = Image::from_bytes(bytes).unwrap();
-            assert_eq!((icon.width(), icon.height()), (36, 36));
-            assert!(icon.rgba().chunks(4).any(|p| p[0] < 32 && p[3] > 200));
-            assert!(
-                icon.rgba()
-                    .chunks(4)
-                    .any(|p| p[0] > 223 && p[3] > 200)
-            );
-            assert!(icon.rgba().chunks(4).any(|p| p[3] == 0));
+    fn windows_assets_are_solid_white_or_black_per_taskbar_theme() {
+        let states = [TrayState::Idle, TrayState::Busy, TrayState::Connected, TrayState::Problem];
+        for (light, ink) in [(false, 255u8), (true, 0u8)] {
+            for (i, state) in states.iter().enumerate() {
+                let icon = windows_image(*state, light);
+                assert_eq!((icon.width(), icon.height()), (32, 32));
+                // Single-colour ink (antialiased only in alpha), with transparent background.
+                assert!(icon.rgba().chunks(4).all(|p| p[3] == 0 || p[..3] == [ink, ink, ink]));
+                assert!(icon.rgba().chunks(4).any(|p| p[3] > 200));
+                assert!(icon.rgba().chunks(4).any(|p| p[3] == 0));
+                for other in &states[..i] {
+                    assert_ne!(icon.rgba(), windows_image(*other, light).rgba());
+                }
+            }
         }
+        // The exclamation is knocked out of the error badge (top-right), not drawn in the ink colour.
+        let error = windows_image(TrayState::Problem, false);
+        let badge_center = (8 * 32 + 25) * 4 + 3;
+        assert!(error.rgba()[badge_center] < 100);
     }
 }

@@ -57,7 +57,7 @@ The user relies on live connections such as SSH on `localhost:2222`. Before repl
 
 - Sources live in `design/icon.svg` (app icon) and `design/tray/*.svg` (the four tray states).
 - Regenerate everything with `node design/render-icons.mjs`. This needs `rsvg-convert` and also reruns `tauri icon`. Revert incidental `icon.icns` byte churn.
-- On macOS the tray PNGs are 44×36 templates (black ink plus alpha). On Windows they are 36×36 with black ink and a white outline.
+- On macOS the tray PNGs are 44×36 templates (black ink plus alpha). On Windows they are 32×32 solid glyphs in two sets, `windows/dark` (white ink) and `windows/light` (black ink), picked from the taskbar theme.
 - Tests in `src-tauri/src/icon.rs` assert these dimensions.
 
 ## Docs

@@ -81,6 +81,7 @@ export interface Snapshot {
   allLabels: string[];
   login?: LoginState | null;
   hotkeyError?: string | null;
+  adminDevtunnel?: boolean;
 }
 
 /** `port` is the local server port; `remotePort` (optional) the tunnel port to advertise instead. */

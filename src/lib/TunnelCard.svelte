@@ -205,6 +205,8 @@
     {#if local}
       {#if t.hostState.kind === "external"}
         <span class="hint">Hosted by another process</span>
+        <button disabled={busy || !ready} title="Stop the external host and host it from Tunnel Bar" onclick={() => onAction(t, "adopt_external")}>Take over</button>
+        <button class="quiet" disabled={busy} onclick={() => onAction(t, "stop_external")}>Stop</button>
       {:else if managedHost}
         <button disabled={busy} onclick={() => onAction(t, "stop_host")}>Stop hosting</button>
       {:else}
@@ -225,6 +227,10 @@
           <button class="primary" disabled={busy || t.state.kind !== "connected"} onclick={() => onOpenSsh(t, sshForwards[0])}><Icon name="terminal" size={14} />Open SSH</button>
         {/if}
         <button class="quiet" disabled={busy} onclick={() => onAction(t, "disconnect")}>Disconnect</button>
+      {:else if t.hostState.kind === "external"}
+        <!-- Another process hosts this tunnel on this machine; connecting to our own host makes no sense. -->
+        <button disabled={busy || !ready} title="Stop the external host and host it from Tunnel Bar" onclick={() => onAction(t, "adopt_external")}>Take over</button>
+        <button class="quiet" disabled={busy} onclick={() => onAction(t, "stop_external")}>Stop</button>
       {:else}
         <button class="primary" disabled={busy || !ready} onclick={() => onAction(t, "connect")}>Connect</button>
       {/if}
