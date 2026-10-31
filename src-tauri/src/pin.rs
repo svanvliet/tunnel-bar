@@ -103,6 +103,15 @@ fn wildcard_conflict(local: u16) -> Option<SocketAddr> {
     })
 }
 
+/// Describes what already uses `port` on this Mac (wildcard or loopback listener), if anything.
+pub fn port_in_use(port: u16) -> Option<SocketAddr> {
+    wildcard_conflict(port).or_else(|| {
+        [SocketAddr::from((Ipv4Addr::LOCALHOST, port)), SocketAddr::from((Ipv6Addr::LOCALHOST, port))]
+            .into_iter()
+            .find(|&a| matches!(std::net::TcpListener::bind(a), Err(e) if e.kind() == std::io::ErrorKind::AddrInUse))
+    })
+}
+
 async fn bind(local: u16) -> std::io::Result<(TcpListener, Option<TcpListener>)> {
     if let Some(addr) = wildcard_conflict(local) {
         return Err(std::io::Error::new(
@@ -268,6 +277,31 @@ mod tests {
             pins.stop_all();
         }
         assert_eq!(wildcard_conflict(free_port()), None);
+    }
+
+    #[test]
+    fn host_map_forwards_tunnel_port_to_local_port() {
+        // Hosting maps listen on the tunnel port itself and forward to the mapped local server.
+        let local = echo_server("ssh");
+        let remote = free_port();
+        let pins = Pins::new(Arc::new(move |id, r| (id == "t" && r == remote).then_some(local)));
+        pins.sync(&[("t".into(), remote, remote)]);
+        wait(|| pins.view("t", remote, remote).listening);
+        assert_eq!(roundtrip(remote), "ssh:hi");
+        assert!(port_in_use(remote).is_some(), "our proxy holds the tunnel port");
+        pins.stop_all();
+        wait(|| std::net::TcpStream::connect(("127.0.0.1", remote)).is_err());
+    }
+
+    #[test]
+    fn port_in_use_sees_loopback_and_wildcard_listeners() {
+        assert_eq!(port_in_use(free_port()), None);
+        let lo = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        assert!(port_in_use(lo.local_addr().unwrap().port()).is_some());
+        for any in ["0.0.0.0:0", "[::]:0"] {
+            let Ok(server) = std::net::TcpListener::bind(any) else { continue };
+            assert!(port_in_use(server.local_addr().unwrap().port()).is_some(), "{any}");
+        }
     }
 
     #[test]

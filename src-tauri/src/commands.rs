@@ -47,9 +47,10 @@ pub async fn expose_port(
     host_header: Option<String>,
     origin_header: Option<String>,
     access_rules: Option<Vec<AccessRuleRequest>>,
+    remote_port: Option<u16>,
 ) -> Result<String, String> {
     let headers = HeaderOptions { host_header, origin_header };
-    state.inner().clone().expose(port, &protocol, anonymous, name.as_deref(), headers, access_rules.unwrap_or_default()).await
+    state.inner().clone().expose(port, remote_port, &protocol, anonymous, name.as_deref(), headers, access_rules.unwrap_or_default()).await
 }
 
 /// Fails with `CONFIRM_REQUIRED: ` on tunnels Tunnel Bar didn't create until `confirm` is passed.
@@ -90,7 +91,9 @@ pub async fn update_tunnel(
     state.inner().clone().update_tunnel(&id, update, confirm.unwrap_or(false), allow_hosted_elsewhere.unwrap_or(false)).await
 }
 
+/// `port` is the local server port; `remotePort` (optional) is the tunnel port clients see.
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 pub async fn add_port(
     state: State<'_, Shared>,
     id: String,
@@ -99,10 +102,11 @@ pub async fn add_port(
     host_header: Option<String>,
     origin_header: Option<String>,
     allow_hosted_elsewhere: Option<bool>,
+    remote_port: Option<u16>,
 ) -> Result<(), String> {
     let protocol = protocol.unwrap_or_default();
     let headers = HeaderOptions { host_header, origin_header };
-    state.inner().clone().add_port(&id, port, &protocol, &headers, allow_hosted_elsewhere.unwrap_or(false)).await
+    state.inner().clone().add_port(&id, port, remote_port, &protocol, &headers, allow_hosted_elsewhere.unwrap_or(false)).await
 }
 
 /// `headers` is `{ hostHeader?, originHeader? }`; `"unchanged"` passes the browser's value through.
@@ -210,8 +214,15 @@ pub fn update_tunnel_settings(state: State<'_, Shared>, id: String, settings: Tu
     }
     state.save_settings()?;
     state.sync_pins(None);
+    state.sync_host_maps(None);
     state.publish();
     Ok(())
+}
+
+/// Hosting: forward tunnel port `remotePort` to localhost:`localPort` (null clears the map).
+#[tauri::command]
+pub async fn set_port_map(state: State<'_, Shared>, id: String, remote_port: u16, local_port: Option<u16>) -> Result<(), String> {
+    state.inner().clone().set_port_map(&id, remote_port, local_port).await
 }
 
 #[tauri::command]

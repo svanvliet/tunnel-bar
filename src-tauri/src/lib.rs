@@ -127,6 +127,7 @@ pub fn run() {
             commands::add_port,
             commands::remove_port,
             commands::set_port_headers,
+            commands::set_port_map,
             commands::list_access_rules,
             commands::add_access_rule,
             commands::remove_access_rule,

@@ -58,24 +58,34 @@ Treat `allowHostedElsewhere` as a deliberate, separate confirmation. Never pass 
 
 | Command | Args | Returns | Notes |
 |---|---|---|---|
-| `add_port` | `id`, `port`, `protocol?` (`"http"`, `"https"`, `"auto"`), `hostHeader?`, `originHeader?`, `allowHostedElsewhere?` | — | See below. |
+| `add_port` | `id`, `port`, `protocol?` (`"http"`, `"https"`, `"auto"`), `hostHeader?`, `originHeader?`, `allowHostedElsewhere?`, `remotePort?` | — | See below. |
+| `set_port_map` | `id`, `remotePort`, `localPort` (number, or `null` to clear) | — | Hosting: forward tunnel port `remotePort` to `localhost:localPort`. See Port mapping below. |
 | `set_port_headers` | `id`, `port`, `headers: HeaderOptions`, `allowHostedElsewhere?` | — | Changes one port's Host/Origin rewriting (`devtunnel port update`). Restarts our host. |
 | `remove_port` | `id`, `port`, `confirm?`, `allowHostedElsewhere?` | — | See below. |
 
 `add_port`:
+- `port` is the local server port. `remotePort`, when set and different, is the tunnel port clients see (e.g. `port: 22, remotePort: 2222`); the mapping is saved in `settings.hostPortMap`.
 - Restarts the local host, if Tunnel Bar is hosting the tunnel, so the new port is published.
 
 `remove_port`:
 - Needs `confirm` for tunnels Tunnel Bar didn't create.
 - Restarts the local host.
-- Removes any pin on that port.
+- Removes any pin and port map on that port.
+
+### Port mapping (hosting)
+
+`devtunnel host` always forwards a tunnel port to `localhost:<same number>`. To advertise a different number (tunnel port 2222 → local SSH on 22), Tunnel Bar runs a loopback proxy on `127.0.0.1`/`::1:<tunnel port>` → `localhost:<local port>` whenever this Mac hosts the tunnel. It starts and stops with hosting (Host button, `autoHost`, reclaimed hosts on startup, port changes).
+
+- Where: `expose_port` (`remotePort?`), `add_port` (`remotePort?`), `create_tunnel` (`ports[].remotePort`), `set_port_map` for existing ports.
+- Refused when something already listens on the tunnel port locally (loopback, `0.0.0.0` or `[::]`), because `devtunnel host` would reach that server instead. `host` refuses for the same reason; otherwise `portMaps[].error` explains why the proxy can't listen and it retries every 3 seconds.
+- Only affects hosting on this Mac. Clients still see the tunnel port number; another machine hosting the tunnel doesn't use the map.
 
 ### Host/Origin header rewriting
 
 By default the service rewrites `Host` to `localhost` and `Origin` to `http(s)://localhost`. Each header can be set to `"unchanged"` (`HEADER_UNCHANGED`), which passes the browser's header through, or to a literal value. Values are trimmed and must not contain spaces; `""`/omitted leaves the setting alone.
 
 - Offer a one-click "Dev server (Vite/Next)" preset that sets both headers to `unchanged`. Apps that build absolute URLs or redirects, or compare `Origin` with `Host` (for example Next.js Server Actions and OAuth callbacks), need the real public hostname. With `Host: unchanged`, Vite also needs the tunnel host in `server.allowedHosts`, for example `.devtunnels.ms`. Mention that next to the preset.
-- Where: `create_tunnel` (tunnel and per port), `expose_port` (`hostHeader?`, `originHeader?`), `add_port`, `set_port_headers`, `update_tunnel`.
+- Where: `create_tunnel` (tunnel and per port), `expose_port` (`hostHeader?`, `originHeader?`, `remotePort?`), `add_port`, `set_port_headers`, `update_tunnel`.
 - Display: `TunnelPort.hostHeader`/`originHeader` show the effective value per port (parsed from `show`, inherited from the tunnel); `null` means the service default. The tunnel-level setting itself isn't reported by `devtunnel show`.
 
 ### Access rules
@@ -122,6 +132,8 @@ By default the service rewrites `Host` to `localhost` and `Origin` to `http(s):/
 - `expirationHours: number | null`: the tunnel's lifetime from the service. The CLI only reports a duration such as "30 days", not an absolute date. Display it with `expirationLabel(hours)`.
 - `matchesFilter: boolean`: dim or hide the tunnel when this is false. The tray menu stays unfiltered.
 - `accessRules: AccessEntry[]`: tunnel-level access rules. See Access rules above.
+- `portMaps: PortMapView[]`: `{remotePort, localPort, listening, error}` per hosting port map. `listening` is the proxy; it is only true while this Mac hosts.
+- `hostedPorts[].localPort`: the server a hosted port reaches. `listening` now refers to that port, so "nothing listening" warnings name `localhost:<localPort>`.
 - `pins: PinView[]`: each entry is `{remotePort, localPort, listening, targetPort, error}`.
   - `targetPort` is the port that `devtunnel connect` actually chose. It is null while the tunnel is disconnected.
   - `error` is set when the pinned port is busy. The proxy retries every 3 seconds.
@@ -129,10 +141,12 @@ By default the service rewrites `Host` to `localhost` and `Origin` to `http(s):/
 
 **`TunnelPort`**
 - `hostHeader`, `originHeader`: effective header rewriting (`"unchanged"`, a value, or `null` = default).
+- `localPort: number | null`: the mapped local server port; show "2222 → localhost:22". `null` means the same number.
 
 **`TunnelSettings`**
 - `pinnedPorts: Record<string, number>`, mapping remote port to local port.
-- `update_tunnel_settings` replaces the whole object, so keep spreading the existing settings, as `saveTunnel` already does. Otherwise the pins are lost.
+- `hostPortMap: Record<string, number>`, mapping tunnel port to local server port for hosting.
+- `update_tunnel_settings` replaces the whole object, so keep spreading the existing settings, as `saveTunnel` already does. Otherwise the pins and port maps are lost.
 
 **`Settings`**
 - `hotkey`: defaults to `CmdOrCtrl+Alt+Shift+T`.
@@ -161,5 +175,5 @@ By default the service rewrites `Host` to `localhost` and `Origin` to `http(s):/
 - **Expiration**
   - Valid choices are 1h–30d (for example 1h, 8h, 1d, 7d, 30d).
 - **Creating a tunnel**
-  - The existing "Expose local port" flow is unchanged (`expose_port`). It now goes through `create_tunnel` internally, and accepts optional `name`, `hostHeader`, `originHeader` and `accessRules` (e.g. `[{kind:"tenant"}]` for "my org only").
+  - The existing "Expose local port" flow is unchanged (`expose_port`). It now goes through `create_tunnel` internally, and accepts optional `name`, `hostHeader`, `originHeader`, `accessRules` and `remotePort` (advertise a different tunnel port) (e.g. `[{kind:"tenant"}]` for "my org only").
   - A full "New tunnel" form can call `create_tunnel` directly.

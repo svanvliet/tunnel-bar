@@ -12,6 +12,8 @@ export interface TunnelPort {
   portNumber: number; protocol: string; portUri: string;
   /** Effective Host/Origin rewriting ("unchanged" or a value; inherited from the tunnel). null = service default (localhost). */
   hostHeader?: string | null; originHeader?: string | null;
+  /** Local server port when this tunnel port is mapped for hosting (`settings.hostPortMap`); null = same number. */
+  localPort?: number | null;
 }
 /** Host/Origin header rewriting for web clients. "unchanged" keeps the browser's header (Vite/Next dev servers need this for Host). Omit = leave as is. */
 export interface HeaderOptions { hostHeader?: string | null; originHeader?: string | null }
@@ -36,10 +38,15 @@ export interface TunnelSettings {
   nickname?: string | null; autoConnect: boolean; autoHost: boolean; sshHost?: string | null;
   /** Stable local ports: remote port -> local port (keys are stringified numbers). Prefer `set_pinned_port`. */
   pinnedPorts?: Record<string, number>;
+  /** Hosting: tunnel port -> local server port (keys are stringified numbers). Prefer `set_port_map`. */
+  hostPortMap?: Record<string, number>;
 }
+/** A hosting port map: while this Mac hosts, 127.0.0.1:`remotePort` forwards to localhost:`localPort`. */
+export interface PortMapView { remotePort: number; localPort: number; listening: boolean; error?: string | null }
 /** A stable-port proxy: `localPort` always forwards to the port `devtunnel connect` picked for `remotePort`. */
 export interface PinView { remotePort: number; localPort: number; listening: boolean; targetPort?: number | null; error?: string | null }
-export interface HostedPort { port: number; protocol: string; uri: string; inspectUri: string; listening: boolean }
+/** `port` is the tunnel port; `localPort` the server it reaches (differs when mapped); `listening` is about `localPort`. */
+export interface HostedPort { port: number; protocol: string; uri: string; inspectUri: string; localPort: number; listening: boolean }
 export interface TunnelSummary {
   tunnelId: string; name: string; hostConnections: number; labels: string[];
   portCount: number; tunnelExpiration: string; description: string;
@@ -55,6 +62,8 @@ export interface TunnelView {
   pins: PinView[];
   /** Tunnel-level access rules (from the last refresh). */
   accessRules: AccessEntry[];
+  /** Hosting port maps (tunnel port != local port) and their proxy status. */
+  portMaps: PortMapView[];
 }
 export interface Settings {
   cliPath?: string | null; launchAtLogin: boolean; notifications: boolean;
@@ -74,7 +83,8 @@ export interface Snapshot {
   hotkeyError?: string | null;
 }
 
-export interface PortSpec extends HeaderOptions { port: number; protocol?: "http" | "https" | "auto" | "" }
+/** `port` is the local server port; `remotePort` (optional) the tunnel port to advertise instead. */
+export interface PortSpec extends HeaderOptions { port: number; remotePort?: number | null; protocol?: "http" | "https" | "auto" | "" }
 export interface CreateTunnelRequest extends HeaderOptions {
   tunnelId?: string | null; description?: string; labels?: string[];
   /** "8h", "30d", … (1h–30d); service default (30 days) when omitted. */
