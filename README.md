@@ -17,18 +17,18 @@ A macOS menu-bar and Windows tray app for managing [Microsoft Dev Tunnels](https
 - Shows forwarded ports (`localhost:L → :R`), with Copy SSH (uses your `~/.ssh/config` alias if one matches) and Open SSH (Terminal on macOS, Windows Terminal or cmd on Windows).
 - Per-tunnel live logs, saved to `~/Library/Logs/TunnelBar/` (`%LOCALAPPDATA%\TunnelBar\logs` on Windows). Settings live in `~/Library/Application Support/me.svv.tunnelbar/` (`%APPDATA%\me.svv.tunnelbar` on Windows).
 - Notifications on unexpected drops and reconnects.
-- Optional local nicknames (double-click a tunnel name).
+- Optional local nicknames (double-click a tunnel name or open its details).
 - Never orphans connections: stops children on Quit/SIGTERM, and reclaims any left by a crash on next launch. On Windows each child runs in a Job Object, so it dies with Tunnel Bar.
 
 ### Hosting
 
-- **＋ Expose a local port**: creates a tunnel labelled `tunnelbar`, adds the port (http/https/auto), and hosts it from this machine.
+- **Expose a local port**: creates a tunnel labelled `tunnelbar`, adds the port (http/https/auto), and hosts it from this machine. An optional Tunnel port can advertise a different number, such as `:2222 → localhost:22`.
 - **Host here** / **Stop hosting** for your own tunnels, with optional **Auto-host** on launch and auto-restart.
 - Shows each hosted port's public URL (open/copy) and Inspect link, and warns when nothing is listening locally.
 - Access control: private (your account) by default; **Make public…** adds anonymous access after confirmation; **Require sign-in** removes it.
-- Delete tunnels that Tunnel Bar created. Tunnels hosted by another machine (e.g. a dev box) are never hosted or deleted from here.
+- Delete tunnels after inline confirmation. Tunnels hosted by another machine require a separate, deliberate override; hosting them here stays disabled.
 
-### Management (Phase 3: backend ready, UI in progress)
+### Management
 
 - Create tunnels with an id, description, labels, an expiration (1h–30d), ports, public access and hosting. Tunnel Bar always adds the `tunnelbar` label.
 - Edit labels, description and expiration. Shows each tunnel's lifetime.
@@ -46,10 +46,19 @@ A macOS menu-bar and Windows tray app for managing [Microsoft Dev Tunnels](https
 
 See [docs/phase3-ui-hooks.md](docs/phase3-ui-hooks.md) for the commands and fields.
 
+### Interface
+
+- Separate **Remote connections** and **Local tunnels** groups, with explicit private/public access.
+- Port tools remain beside their address; long URLs truncate without wrapping buttons.
+- Tunnel details contain IDs, rename, logs, and secondary actions. Public access and deletion require inline confirmation.
+- A single feedback dock shows brief copy/save confirmations and persistent, actionable errors without covering controls.
+- Shared light/dark styling, keyboard focus, and reduced-motion support. App and tray icons are unchanged.
+- See [the design refresh plan](docs/design-refresh-plan.md) for scope and validation.
+
 ## Requirements
 
 - macOS 11+, or Windows 10/11 (WebView2 is installed by the installer if missing)
-- `devtunnel` CLI (`brew install --cask devtunnel` / `winget install Microsoft.devtunnel`), signed in with `devtunnel user login`
+- `devtunnel` CLI (`brew install --cask devtunnel` / `winget install Microsoft.devtunnel`); sign in within Tunnel Bar or with `devtunnel user login`
 
 ## Install
 
@@ -115,6 +124,6 @@ cd .. && npm run check
 
 1. ~~Phase 1 – connection management MVP~~ (v0.1.0)
 2. ~~Phase 2 – hosting (`devtunnel host`) from the menu bar~~ (v0.2.0)
-3. Phase 3 – tunnel management (create, delete, ports, labels, expiration, sign-in, stable ports, hotkey, label filter): backend done, UI in progress
-4. Phase 4 – Windows tray version: cross-checked on macOS, awaiting a build and testing on a PC
+3. Phase 3 – tunnel management (create, delete, ports, labels, expiration, sign-in, stable ports, hotkey, label filter)
+4. Phase 4 – Windows tray version: builds and runs on a PC; fixes in progress
 5. Phase 5 – signed/notarized DMG, auto-update, CI releases

@@ -138,7 +138,7 @@ export function stateLabel(s: ConnState): string {
     case "reconnecting": return "Reconnecting…";
     case "backoff": return `Retrying in ${s.retryInSecs}s (attempt ${s.attempt})`;
     case "authRequired": return "Sign-in required";
-    case "external": return `Connected outside Tunnel Bar (pid ${s.pid})`;
+    case "external": return `External connection (pid ${s.pid})`;
   }
 }
 
@@ -158,7 +158,7 @@ export function hostLabel(s: ConnState): string {
     case "connecting": return "Starting host…";
     case "connected": return "Hosting";
     case "reconnecting": return "Host reconnecting…";
-    case "external": return `Hosted outside Tunnel Bar (pid ${s.pid})`;
+    case "external": return `External host (pid ${s.pid})`;
     default: return stateLabel(s);
   }
 }

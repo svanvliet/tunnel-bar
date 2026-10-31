@@ -1,6 +1,6 @@
 # Phase 3 UI hooks
 
-These are the backend hooks for the Phase 3 management features. The Rust side is in `src-tauri/src`, and the TS types are in `src/lib/types.ts`. The UI has not been changed. Use "Tunnel Bar" in every user-facing string.
+These are the backend hooks for the Phase 3 management features. The Rust side is in `src-tauri/src`, and the TS types are in `src/lib/types.ts`. The refreshed UI integrates these hooks through Expose, tunnel management and Settings; see [design-refresh-plan.md](design-refresh-plan.md). Use "Tunnel Bar" in every user-facing string.
 
 All commands use Tauri's camelCase argument names. Errors reject the `invoke` promise with a string.
 
