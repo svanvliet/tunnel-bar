@@ -62,6 +62,7 @@ The user relies on live connections such as SSH on `localhost:2222`. Before repl
 
 ## Docs
 
+- **Keep docs current in the same change.** Any change to features, commands, settings, install/build/release steps, platform behaviour or agent workflow updates the affected docs in the same commit: `README.md`, `AGENTS.md`, `docs/*.md` and screenshots. Lanes include the doc updates on their branch; the conductor checks for them in review and doesn't merge code whose docs are stale.
 - `README.md` documents features with screenshots in `docs/screenshots/`. Screenshots use **synthetic data only**: no real tunnel IDs, accounts or hostnames.
 
 ## Environment quirks (macOS host)
