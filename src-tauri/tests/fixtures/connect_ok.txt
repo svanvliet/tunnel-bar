@@ -1,0 +1,6 @@
+Connection to client tunnel relay restored.
+Connected to tunnel: devbox-ssh
+SSH: Forwarding from 127.0.0.1:2223 to host port 2222.
+SSH: Forwarding from [::1]:2223 to host port 2222.
+SSH: PortForwardingService listening on 127.0.0.1:2223.
+SSH: PortForwardingService also listening on ::1:2223.
