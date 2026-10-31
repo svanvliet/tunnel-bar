@@ -8,17 +8,20 @@ A macOS menu-bar and Windows tray app for managing [Microsoft Dev Tunnels](https
 
 ## Features
 
-### Connections
+### Connecting
 
-- Lists every tunnel on your account, with host online/offline status.
+- Browse your account's tunnels in **Remote connections** and **Local tunnels**, with host online/offline status.
 - Connect and disconnect, with auto-reconnect using exponential backoff. Stops retrying on auth errors.
-- Per-tunnel **Auto** connect on launch; launch at login.
+- Per-tunnel **Auto** connect on launch.
 - Detects `devtunnel connect` processes started outside Tunnel Bar, with **Take over** and **Stop**.
 - Shows forwarded ports (`localhost:L → :R`), with Copy SSH (uses your `~/.ssh/config` alias if one matches) and Open SSH (Terminal on macOS, Windows Terminal or cmd on Windows).
-- Per-tunnel live logs, saved to `~/Library/Logs/TunnelBar/` (`%LOCALAPPDATA%\TunnelBar\logs` on Windows). Settings live in `~/Library/Application Support/me.svv.tunnelbar/` (`%APPDATA%\me.svv.tunnelbar` on Windows).
-- Notifications on unexpected drops and reconnects.
 - Optional local nicknames (double-click a tunnel name or open its details).
 - Never orphans connections: stops children on Quit/SIGTERM, and reclaims any left by a crash on next launch. On Windows each child runs in a Job Object, so it dies with Tunnel Bar.
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/screenshots/main-dark.png">
+  <img src="docs/screenshots/main-light.png" width="400" alt="Remote SSH connection with its forwarded localhost port, Open SSH and Auto controls, above local tunnels">
+</picture>
 
 ### Hosting
 
@@ -28,6 +31,15 @@ A macOS menu-bar and Windows tray app for managing [Microsoft Dev Tunnels](https
 - Access control: private (your account) by default; **Make public…** adds anonymous access after confirmation; **Require sign-in** removes it.
 - Delete tunnels after inline confirmation. Tunnels hosted by another machine require a separate, deliberate override; hosting them here stays disabled.
 
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/screenshots/expose-dark.png">
+  <img src="docs/screenshots/expose-light.png" width="400" alt="Expose a local port form with optional tunnel port and name, protocol selection and private access by default">
+</picture>
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/screenshots/public-confirmation-dark.png">
+  <img src="docs/screenshots/public-confirmation-light.png" width="400" alt="Inline Make public confirmation explaining that anyone with the URL can connect to every port without signing in">
+</picture>
+
 ### Management
 
 - Create tunnels with an id, description, labels, an expiration (1h–30d), ports, public access and hosting. Tunnel Bar always adds the `tunnelbar` label.
@@ -36,15 +48,53 @@ A macOS menu-bar and Windows tray app for managing [Microsoft Dev Tunnels](https
 - Access rules beyond public: your Entra tenant, a GitHub organization (needs a GitHub sign-in) or a repository, as allow or deny rules with an optional expiration, on the tunnel or a single port. Changing rules on a tunnel Tunnel Bar didn't create needs confirmation.
 - Host/Origin header rewriting per tunnel or port, including `unchanged` for dev servers like Vite and Next.js.
 - **Port mapping when hosting**: advertise a different tunnel port than the local one (e.g. 2222 → `localhost:22`). `devtunnel host` can't do this itself, so Tunnel Bar runs a loopback proxy on the tunnel port while it hosts.
-- Delete tunnels.
-  - Deleting a tunnel Tunnel Bar didn't create needs explicit confirmation.
-  - A tunnel hosted by another machine also needs a separate override.
-- In-app sign-in (Microsoft or GitHub, with a browser or device-code flow) and sign-out.
+- Deleting a tunnel Tunnel Bar didn't create needs explicit confirmation; a tunnel hosted by another machine also needs a separate override.
 - **Stable local ports**: pin a remote port to a fixed `localhost` port. Tunnel Bar runs a small loopback proxy to whichever port `devtunnel connect` picked. A static `~/.ssh/config` `Port` then keeps working across reconnects, and Copy/Open SSH use the pin.
-- A global hotkey toggles the popover. The default is ⌘⌥⇧T, and it can be configured or disabled.
-- Filter tunnels by label.
 
 See [docs/phase3-ui-hooks.md](docs/phase3-ui-hooks.md) for the commands and fields.
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/screenshots/access-rules-dark.png">
+  <img src="docs/screenshots/access-rules-light.png" width="400" alt="Port-scoped access rules showing inherited anonymous access and a GitHub organization rule">
+</picture>
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/screenshots/ports-and-pins-dark.png">
+  <img src="docs/screenshots/ports-and-pins-light.png" width="400" alt="Tunnel details with a stable localhost port pin and Host and Origin header rewriting controls">
+</picture>
+
+### Settings and sign-in
+
+- Launch at login and notifications on unexpected drops and reconnects.
+- Configure or disable the global popover hotkey (default ⌘⌥⇧T), and filter tunnels by label without stopping connections.
+- Auto-detect the `devtunnel` CLI or set its path. Sign in with Microsoft or GitHub using a browser or device code; sign out after inline confirmation.
+- Settings live in `~/Library/Application Support/me.svv.tunnelbar/` (`%APPDATA%\me.svv.tunnelbar` on Windows).
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/screenshots/settings-dark.png">
+  <img src="docs/screenshots/settings-light.png" width="400" alt="Settings for launch at login, connection notifications, the global shortcut and label filtering">
+</picture>
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/screenshots/sign-in-device-code-dark.png">
+  <img src="docs/screenshots/sign-in-device-code-light.png" width="400" alt="Device-code sign-in with Copy code, Open sign-in page and Cancel sign-in controls">
+</picture>
+
+### Logs
+
+Follow per-tunnel live logs from tunnel details, with timestamps, highlighted errors, Copy and Clear controls. Open the saved logs folder from the viewer or Settings: `~/Library/Logs/TunnelBar/` on macOS, `%LOCALAPPDATA%\TunnelBar\logs` on Windows.
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/screenshots/logs-dark.png">
+  <img src="docs/screenshots/logs-light.png" width="400" alt="Live tunnel logs showing connection, forwarded port, relay error and reconnection events, with Follow enabled">
+</picture>
+
+### Windows
+
+The tray flyout shares the same connection, hosting and management controls, with light/dark styling and taskbar-theme-aware tray icons. Open SSH uses Windows Terminal or cmd; supervised CLI children run in Job Objects so they stop when Tunnel Bar exits.
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/screenshots/windows-main-dark.png">
+  <img src="docs/screenshots/windows-main-light.png" width="400" alt="Windows tray flyout with a remote SSH connection, a hosted public web port and an inactive private local tunnel">
+</picture>
 
 ### Interface
 
