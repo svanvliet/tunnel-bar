@@ -74,6 +74,7 @@ pub fn ssh_command(alias: Option<&str>, local_port: u16) -> Vec<String> {
     vec!["ssh".into(), "-p".into(), local_port.to_string(), alias.unwrap_or("localhost").to_string()]
 }
 
+#[cfg_attr(windows, allow(dead_code))]
 fn shell_quote(s: &str) -> String {
     if s.chars().all(|c| c.is_ascii_alphanumeric() || "-_.:/@".contains(c)) {
         s.to_string()
@@ -82,11 +83,30 @@ fn shell_quote(s: &str) -> String {
     }
 }
 
+/// Quotes an argument for a cmd.exe command line. `"` can't be escaped reliably, so it's dropped.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn cmd_quote(s: &str) -> String {
+    let s = s.replace('"', "");
+    if !s.is_empty() && s.chars().all(|c| c.is_ascii_alphanumeric() || "-_.:/@\\".contains(c)) {
+        s
+    } else {
+        format!("\"{s}\"")
+    }
+}
+
+/// Batch file that echoes and runs `line` (CRLF, `%` doubled so it isn't expanded).
+#[cfg_attr(not(windows), allow(dead_code))]
+fn windows_script(line: &str) -> String {
+    let line = line.replace('%', "%%");
+    let shown: String = line.chars().filter(|c| !"&|<>^()\"".contains(*c)).collect();
+    format!("@echo off\r\ntitle Tunnel Bar\r\necho $ {shown}\r\n{line}\r\n")
+}
+
 /// Opens the default terminal running the given command.
 pub fn open_terminal(cmd: &[String]) -> Result<(), String> {
-    let line = cmd.iter().map(|a| shell_quote(a)).collect::<Vec<_>>().join(" ");
     #[cfg(target_os = "macos")]
     {
+        let line = cmd.iter().map(|a| shell_quote(a)).collect::<Vec<_>>().join(" ");
         let dir: PathBuf = crate::settings::config_dir().join("scripts");
         std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
         let path = dir.join("open-ssh.command");
@@ -103,16 +123,35 @@ pub fn open_terminal(cmd: &[String]) -> Result<(), String> {
     }
     #[cfg(windows)]
     {
-        let _ = PathBuf::new();
-        std::process::Command::new("cmd")
-            .args(["/C", "start", "", "wt.exe", "cmd", "/K", &line])
+        use std::os::windows::process::CommandExt;
+        let line = cmd.iter().map(|a| cmd_quote(a)).collect::<Vec<_>>().join(" ");
+        let dir: PathBuf = crate::settings::config_dir().join("scripts");
+        std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+        std::fs::write(dir.join("open-ssh.cmd"), windows_script(&line)).map_err(|e| e.to_string())?;
+        // Windows Terminal first; `-d` sets the tab's directory so the script path needs no quoting.
+        let wt = std::process::Command::new("wt.exe")
+            .arg("-w")
+            .arg("new")
+            .arg("new-tab")
+            .args(["--title", "Tunnel Bar", "-d"])
+            .arg(&dir)
+            .args(["cmd.exe", "/K", "open-ssh.cmd"])
+            .creation_flags(crate::win::CREATE_NO_WINDOW)
+            .spawn();
+        if wt.is_ok() {
+            return Ok(());
+        }
+        std::process::Command::new("cmd.exe")
+            .args(["/K", "open-ssh.cmd"])
+            .current_dir(&dir)
+            .creation_flags(crate::win::CREATE_NEW_CONSOLE)
             .spawn()
             .map_err(|e| e.to_string())?;
         Ok(())
     }
     #[cfg(all(unix, not(target_os = "macos")))]
     {
-        let _ = PathBuf::new();
+        let line = cmd.iter().map(|a| shell_quote(a)).collect::<Vec<_>>().join(" ");
         std::process::Command::new("x-terminal-emulator")
             .args(["-e", &line])
             .spawn()
@@ -154,5 +193,17 @@ Host *
     fn builds_command() {
         assert_eq!(ssh_command(Some("a"), 2223), vec!["ssh", "-p", "2223", "a"]);
         assert_eq!(shell_quote("redmond\\x"), "'redmond\\x'");
+    }
+
+    #[test]
+    fn builds_windows_script() {
+        assert_eq!(cmd_quote("redmond\\x"), "redmond\\x");
+        assert_eq!(cmd_quote("a b"), "\"a b\"");
+        assert_eq!(cmd_quote("x&y\""), "\"x&y\"");
+        assert_eq!(cmd_quote(""), "\"\"");
+        let s = windows_script("ssh -p 2222 \"100%\"");
+        assert!(s.starts_with("@echo off\r\n"));
+        assert!(s.contains("\r\nssh -p 2222 \"100%%\"\r\n"));
+        assert!(s.contains("echo $ ssh -p 2222 100%%\r\n"));
     }
 }

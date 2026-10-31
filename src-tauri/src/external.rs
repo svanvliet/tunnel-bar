@@ -110,11 +110,43 @@ fn pid_group(pid: u32) -> String {
     if pgid > 0 { pgid.to_string() } else { pid.to_string() }
 }
 
+/// Local TCP listen ports owned by a process or any of its descendants.
 #[cfg(windows)]
-pub fn listen_ports(_pid: u32) -> Vec<u16> {
-    vec![]
+pub fn listen_ports(pid: u32) -> Vec<u16> {
+    let Ok(mut sys) = System::new() else { return vec![] };
+    sys.refresh_processes_specifics(ProcessesToUpdate::All, true, ProcessRefreshKind::nothing());
+    let parents: Vec<(u32, Option<u32>)> =
+        sys.processes().iter().map(|(p, pr)| (p.as_u32(), pr.parent().map(|x| x.as_u32()))).collect();
+    ports_owned_by(&crate::win::tcp_listeners(), &descendants(pid, &parents))
 }
 
+/// `root` plus every transitive child, in breadth-first order, given (pid, parent) pairs.
+#[cfg_attr(not(windows), allow(dead_code))]
+pub fn descendants(root: u32, parents: &[(u32, Option<u32>)]) -> Vec<u32> {
+    let mut out = vec![root];
+    let mut i = 0;
+    while i < out.len() {
+        let cur = out[i];
+        for &(p, pp) in parents {
+            if pp == Some(cur) && p != cur && !out.contains(&p) {
+                out.push(p);
+            }
+        }
+        i += 1;
+    }
+    out
+}
+
+/// Sorted, de-duplicated ports from (port, pid) listener rows whose pid is in `pids`.
+#[cfg_attr(not(windows), allow(dead_code))]
+pub fn ports_owned_by(listeners: &[(u16, u32)], pids: &[u32]) -> Vec<u16> {
+    let mut ports: Vec<u16> = listeners.iter().filter(|(_, p)| pids.contains(p)).map(|(port, _)| *port).collect();
+    ports.sort();
+    ports.dedup();
+    ports
+}
+
+#[cfg(any(unix, test))]
 pub fn parse_lsof_ports(s: &str) -> Vec<u16> {
     let mut ports: Vec<u16> = s
         .lines()
@@ -174,5 +206,23 @@ mod tests {
     fn parses_lsof() {
         assert_eq!(parse_lsof_ports("p2787\nf125\nn127.0.0.1:2222\nf126\nn[::1]:2222\n"), vec![2222]);
         assert_eq!(guess_forwards(&[2223], &[2222]), vec![Forward { local_port: 2223, remote_port: 2222 }]);
+    }
+
+    #[test]
+    fn walks_descendants_and_filters_listeners() {
+        let tree = [(10, Some(1)), (11, Some(10)), (12, Some(11)), (20, Some(1)), (1, None)];
+        assert_eq!(descendants(10, &tree), vec![10, 11, 12]);
+        assert_eq!(descendants(99, &tree), vec![99]);
+        let rows = [(2222, 11), (2222, 11), (8080, 20), (2223, 10)];
+        assert_eq!(ports_owned_by(&rows, &[10, 11, 12]), vec![2222, 2223]);
+    }
+
+    #[test]
+    fn parses_windows_cmdlines() {
+        assert_eq!(
+            parse_cmdline(&v(&[r"C:\Users\me\AppData\Local\Microsoft\WinGet\Links\devtunnel.exe", "connect", "x.usw3"])),
+            Some("x.usw3".into())
+        );
+        assert_eq!(parse_cmdline_role(&v(&["DevTunnel.EXE", "host", "y"])), Some((Role::Host, "y".into())));
     }
 }

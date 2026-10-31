@@ -379,7 +379,8 @@ impl AppState {
 
     async fn refresh_inner(self: &Arc<Self>) -> Result<(), String> {
         let Some(cli_path) = self.cli_path().await else {
-            return Err("devtunnel CLI not found. Install it (brew install --cask devtunnel) or set its path in Settings.".into());
+            let install = if cfg!(windows) { "winget install Microsoft.devtunnel" } else { "brew install --cask devtunnel" };
+            return Err(format!("devtunnel CLI not found. Install it ({install}) or set its path in Settings."));
         };
         if self.cache.lock().unwrap().cli_version.is_none() {
             let v = cli::version(&cli_path).await;
@@ -1311,14 +1312,21 @@ pub fn start_background(state: Shared) {
         let mut last_wall = chrono::Local::now();
         let mut ticks: u64 = 0;
         loop {
-            tokio::time::sleep(Duration::from_secs(5)).await;
+            let resumed = tick().await;
             ticks += 1;
             let now = chrono::Local::now();
             let gap = (now - last_wall).num_seconds();
             last_wall = now;
-            if gap > 30 {
+            if resumed || gap > 30 {
                 // Woke from sleep: retry immediately instead of waiting out backoff.
-                state.logs.push("_app", "app", &format!("Wake detected (gap {gap}s)"));
+                if resumed {
+                    state.logs.push("_app", "app", "Resumed from sleep");
+                    // Give the network a moment to come back.
+                    tokio::time::sleep(Duration::from_secs(3)).await;
+                    last_wall = chrono::Local::now();
+                } else {
+                    state.logs.push("_app", "app", &format!("Wake detected (gap {gap}s)"));
+                }
                 state.supervisor.kick_all();
                 state.hoster.kick_all();
                 state.refresh().await;
@@ -1333,6 +1341,23 @@ pub fn start_background(state: Shared) {
             }
         }
     });
+}
+
+/// Waits for the next 5s tick; returns true if the OS reported a resume from sleep instead.
+/// The wall-clock gap check covers macOS, where the monotonic clock pauses during sleep.
+async fn tick() -> bool {
+    #[cfg(windows)]
+    {
+        tokio::select! {
+            _ = tokio::time::sleep(Duration::from_secs(5)) => false,
+            _ = crate::win::resumed().notified() => true,
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        tokio::time::sleep(Duration::from_secs(5)).await;
+        false
+    }
 }
 
 pub fn state(app: &AppHandle) -> Shared {

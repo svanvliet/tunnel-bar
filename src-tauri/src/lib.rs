@@ -15,6 +15,8 @@ mod settings;
 mod ssh;
 mod supervisor;
 mod tray;
+#[cfg(windows)]
+mod win;
 
 use tauri::{Manager, RunEvent, WindowEvent};
 
@@ -67,15 +69,17 @@ pub fn run() {
             if let Some(w) = app.get_webview_window("main") {
                 let w2 = w.clone();
                 w.on_window_event(move |e| match e {
-                    WindowEvent::Focused(false) if tray::should_hide_on_blur() => {
-                        let _ = w2.hide();
-                    }
+                    WindowEvent::Focused(false) if tray::should_hide_on_blur() => tray::hide_window(&w2),
                     WindowEvent::CloseRequested { api, .. } => {
                         api.prevent_close();
                         let _ = w2.hide();
                     }
                     _ => {}
                 });
+            }
+            #[cfg(windows)]
+            if let Err(e) = win::register_power_notifications() {
+                state.logs.push("_app", "app", &e);
             }
             #[cfg(unix)]
             {

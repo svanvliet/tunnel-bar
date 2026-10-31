@@ -253,7 +253,7 @@ impl Supervisor {
         #[cfg(unix)]
         cmd.process_group(0);
         #[cfg(windows)]
-        cmd.creation_flags(0x0800_0000);
+        cmd.creation_flags(crate::win::CREATE_NO_WINDOW);
         let mut child = match cmd.spawn() {
             Ok(c) => c,
             Err(e) => {
@@ -263,6 +263,12 @@ impl Supervisor {
             }
         };
         let pid = child.id();
+        // Put the child in a kill-on-close Job Object so its whole tree dies with it, or with us if we crash.
+        #[cfg(windows)]
+        let _job = match pid.zip(child.raw_handle()) {
+            Some((p, h)) => crate::win::JobGuard::attach(p, h as _).map_err(|e| self.log(id, "app", &e)).ok(),
+            None => None,
+        };
         {
             let mut m = self.inner.lock().unwrap();
             if let Some(e) = m.get_mut(id) {
@@ -452,9 +458,13 @@ pub fn signal_group(pid: u32, force: bool) {
     }
 }
 
+/// Windows has no SIGTERM for console-less children: terminate the child's Job Object (whole tree),
+/// or walk the process tree for PIDs we don't own a job for.
 #[cfg(windows)]
 pub fn signal_group(pid: u32, _force: bool) {
-    let _ = std::process::Command::new("taskkill").args(["/PID", &pid.to_string(), "/T", "/F"]).output();
+    if !crate::win::terminate_job(pid) {
+        crate::win::kill_tree(pid);
+    }
 }
 
 #[cfg(unix)]
@@ -464,9 +474,7 @@ pub fn alive(pid: u32) -> bool {
 
 #[cfg(windows)]
 pub fn alive(pid: u32) -> bool {
-    let Ok(mut s) = sysinfo::System::new() else { return false };
-    s.refresh_processes(sysinfo::ProcessesToUpdate::Some(&[sysinfo::Pid::from_u32(pid)]), true);
-    s.process(sysinfo::Pid::from_u32(pid)).is_some()
+    crate::win::alive(pid)
 }
 
 #[cfg(test)]
@@ -482,7 +490,28 @@ mod tests {
         assert_eq!(backoff_secs(100), 60);
     }
 
+    /// Writes a fake `devtunnel` batch file that runs `body` (cmd syntax).
+    #[cfg(windows)]
+    fn fake_cli(dir: &std::path::Path, body: &str) -> PathBuf {
+        let p = dir.join("devtunnel.cmd");
+        std::fs::write(&p, format!("@echo off\r\n{}\r\n", body.replace('\n', "\r\n"))).unwrap();
+        p
+    }
+
+    /// Picks the fake CLI body for the current platform.
+    fn script(unix: &str, windows: &str) -> String {
+        if cfg!(windows) { windows.into() } else { unix.into() }
+    }
+
+    fn fixture(name: &str) -> String {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests").join("fixtures").join(name).display().to_string()
+    }
+
+    /// Windows sleep for batch files (`timeout` needs a console).
+    const WIN_SLEEP: &str = "ping -n 31 127.0.0.1 >nul";
+
     /// Writes a fake `devtunnel` script that runs `body` for `connect`.
+    #[cfg(unix)]
     fn fake_cli(dir: &std::path::Path, body: &str) -> PathBuf {
         use std::os::unix::fs::PermissionsExt;
         let p = dir.join("devtunnel");
@@ -513,12 +542,11 @@ mod tests {
         panic!("timed out; state = {:?}", s.state(id).0);
     }
 
-    #[cfg(unix)]
     #[test]
     fn connects_forwards_and_disconnects_cleanly() {
         let dir = tempfile::tempdir().unwrap();
-        let fixture = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/connect_ok.txt");
-        let cli = fake_cli(dir.path(), &format!("cat '{fixture}'\nexec sleep 30"));
+        let f = fixture("connect_ok.txt");
+        let cli = fake_cli(dir.path(), &script(&format!("cat '{f}'\nexec sleep 30"), &format!("type \"{f}\"\n{WIN_SLEEP}")));
         let (s, _) = sup(dir.path());
         s.connect("t.usw3", cli);
         wait_for(&s, "t.usw3", |st| *st == ConnState::Connected);
@@ -538,13 +566,18 @@ mod tests {
         assert!(!s.is_active("t.usw3"));
     }
 
-    #[cfg(unix)]
     #[test]
     fn hosts_with_host_subcommand_and_tracks_hosted_ports() {
         let dir = tempfile::tempdir().unwrap();
-        let fixture = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/host_ok.txt");
+        let f = fixture("host_ok.txt");
         // Only succeed when invoked as `host <id>`.
-        let cli = fake_cli(dir.path(), &format!("[ \"$1\" = host ] || exit 9\ncat '{fixture}'\nexec sleep 30"));
+        let cli = fake_cli(
+            dir.path(),
+            &script(
+                &format!("[ \"$1\" = host ] || exit 9\ncat '{f}'\nexec sleep 30"),
+                &format!("if not \"%1\"==\"host\" exit /b 9\ntype \"{f}\"\n{WIN_SLEEP}"),
+            ),
+        );
         let logs = Arc::new(LogStore::new(dir.path().join("logs")));
         let roles = Arc::new(Mutex::new(Vec::new()));
         let r2 = roles.clone();
@@ -569,11 +602,10 @@ mod tests {
         wait_for(&s, "t.usw3", |st| *st == ConnState::Disconnected);
     }
 
-    #[cfg(unix)]
     #[test]
     fn crashing_child_backs_off_then_stops_on_disconnect() {
         let dir = tempfile::tempdir().unwrap();
-        let cli = fake_cli(dir.path(), "echo 'Error: host not available'\nexit 3");
+        let cli = fake_cli(dir.path(), &script("echo 'Error: host not available'\nexit 3", "echo Error: host not available\nexit /b 3"));
         let (s, _) = sup(dir.path());
         s.connect("t.usw3", cli);
         let st = wait_for(&s, "t.usw3", |st| matches!(st, ConnState::Backoff { attempt: 2.., .. }));
@@ -584,11 +616,16 @@ mod tests {
         wait_for(&s, "t.usw3", |st| *st == ConnState::Disconnected);
     }
 
-    #[cfg(unix)]
     #[test]
     fn auth_failure_stops_retrying() {
         let dir = tempfile::tempdir().unwrap();
-        let cli = fake_cli(dir.path(), "echo 'Login required. Run devtunnel user login.' >&2\nexec sleep 30");
+        let cli = fake_cli(
+            dir.path(),
+            &script(
+                "echo 'Login required. Run devtunnel user login.' >&2\nexec sleep 30",
+                &format!("echo Login required. Run devtunnel user login. 1>&2\n{WIN_SLEEP}"),
+            ),
+        );
         let (s, _) = sup(dir.path());
         s.connect("t.usw3", cli);
         wait_for(&s, "t.usw3", |st| matches!(st, ConnState::AuthRequired { .. }));
@@ -700,11 +737,10 @@ mod tests {
         assert!(std::net::TcpStream::connect(("127.0.0.1", port)).is_err(), "listener closed");
     }
 
-    #[cfg(unix)]
     #[test]
     fn pidfile_tracks_children_and_reclaims_orphans() {
         let dir = tempfile::tempdir().unwrap();
-        let cli = fake_cli(dir.path(), "echo 'Connected to tunnel: t1'; sleep 30");
+        let cli = fake_cli(dir.path(), &script("echo 'Connected to tunnel: t1'; sleep 30", &format!("echo Connected to tunnel: t1\n{WIN_SLEEP}")));
         let pidfile = dir.path().join("children.json");
         let (s, _) = sup(dir.path());
         let s = s.with_pidfile(pidfile.clone());
@@ -735,7 +771,7 @@ mod tests {
     #[test]
     fn shutdown_clears_pidfile() {
         let dir = tempfile::tempdir().unwrap();
-        let cli = fake_cli(dir.path(), "echo 'Connected to tunnel: t1'; sleep 30");
+        let cli = fake_cli(dir.path(), &script("echo 'Connected to tunnel: t1'; sleep 30", &format!("echo Connected to tunnel: t1\n{WIN_SLEEP}")));
         let pidfile = dir.path().join("children.json");
         let (s, _) = sup(dir.path());
         let s = s.with_pidfile(pidfile.clone());
@@ -749,7 +785,7 @@ mod tests {
     #[test]
     fn shutdown_kills_children() {
         let dir = tempfile::tempdir().unwrap();
-        let cli = fake_cli(dir.path(), "echo 'Connected to tunnel: x'\nexec sleep 30");
+        let cli = fake_cli(dir.path(), &script("echo 'Connected to tunnel: x'\nexec sleep 30", &format!("echo Connected to tunnel: x\n{WIN_SLEEP}")));
         let (s, _) = sup(dir.path());
         s.connect("a.usw3", cli.clone());
         s.connect("b.usw3", cli);
@@ -759,5 +795,38 @@ mod tests {
         assert_eq!(pids.len(), 2);
         s.shutdown();
         assert!(pids.iter().all(|&p| !alive(p)));
+    }
+
+    /// The Job Object must take down grandchildren (cmd.exe -> ping.exe) when the child is stopped.
+    #[cfg(windows)]
+    #[test]
+    fn job_object_kills_grandchildren() {
+        let dir = tempfile::tempdir().unwrap();
+        let cli = fake_cli(dir.path(), &format!("echo Connected to tunnel: x\n{WIN_SLEEP}"));
+        let (s, _) = sup(dir.path());
+        s.connect("g.usw3", cli);
+        wait_for(&s, "g.usw3", |st| *st == ConnState::Connected);
+        let pid = s.managed_pids()[0];
+        let kids = || {
+            let mut sys = sysinfo::System::new().unwrap();
+            sys.refresh_processes(sysinfo::ProcessesToUpdate::All, true);
+            let parents: Vec<(u32, Option<u32>)> =
+                sys.processes().iter().map(|(p, pr)| (p.as_u32(), pr.parent().map(|x| x.as_u32()))).collect();
+            crate::external::descendants(pid, &parents).into_iter().skip(1).collect::<Vec<_>>()
+        };
+        let mut grandkids = vec![];
+        for _ in 0..40 {
+            grandkids = kids();
+            if !grandkids.is_empty() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        assert!(!grandkids.is_empty(), "fake CLI should have spawned ping");
+        s.disconnect("g.usw3");
+        wait_for(&s, "g.usw3", |st| *st == ConnState::Disconnected);
+        std::thread::sleep(Duration::from_millis(300));
+        assert!(!alive(pid));
+        assert!(grandkids.iter().all(|&p| !alive(p)), "grandchildren must die with the job");
     }
 }

@@ -156,11 +156,10 @@ pub fn show_window(app: &AppHandle) {
     #[cfg(debug_assertions)]
     eprintln!("[tray] show_window");
     if let Some(w) = app.get_webview_window("main") {
-        #[cfg(target_os = "windows")]
-        let pos = Position::TrayBottomCenter;
-        #[cfg(not(target_os = "windows"))]
-        let pos = Position::TrayCenter;
-        if w.as_ref().window().move_window(pos).is_err() {
+        #[cfg(windows)]
+        position_flyout(app, &w);
+        #[cfg(not(windows))]
+        if w.as_ref().window().move_window(Position::TrayCenter).is_err() {
             let _ = w.move_window(Position::TopRight);
         }
         *SHOWN_AT.lock().unwrap() = Some(std::time::Instant::now());
@@ -170,11 +169,91 @@ pub fn show_window(app: &AppHandle) {
     }
 }
 
+/// Places the flyout against the taskbar next to the tray icon, like the built-in Windows flyouts.
+#[cfg(windows)]
+fn position_flyout(app: &AppHandle, w: &tauri::WebviewWindow) {
+    let tray_rect = app.tray_by_id(TRAY_ID).and_then(|t| t.rect().ok().flatten());
+    let (Ok(size), Some((tray, monitor))) = (
+        w.outer_size(),
+        tray_rect.and_then(|r| {
+            let scale = w.scale_factor().unwrap_or(1.0);
+            let p = r.position.to_physical::<i32>(scale);
+            let s = r.size.to_physical::<u32>(scale);
+            let m = w.monitor_from_point(p.x as f64 + 1.0, p.y as f64 + 1.0).ok().flatten()?;
+            Some((Rect { x: p.x, y: p.y, w: s.width as i32, h: s.height as i32 }, m))
+        }),
+    ) else {
+        let _ = w.move_window(Position::BottomRight);
+        return;
+    };
+    let mr = Rect {
+        x: monitor.position().x,
+        y: monitor.position().y,
+        w: monitor.size().width as i32,
+        h: monitor.size().height as i32,
+    };
+    let wa = monitor.work_area();
+    let work = Rect { x: wa.position.x, y: wa.position.y, w: wa.size.width as i32, h: wa.size.height as i32 };
+    let margin = (12.0 * monitor.scale_factor()) as i32;
+    let (x, y) = flyout_position(tray, (size.width as i32, size.height as i32), mr, work, margin);
+    let _ = w.set_position(tauri::PhysicalPosition::new(x, y));
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+#[cfg_attr(not(windows), allow(dead_code))]
+struct Rect {
+    x: i32,
+    y: i32,
+    w: i32,
+    h: i32,
+}
+
+/// Top-left for a `win`-sized flyout anchored to the tray icon on whichever monitor edge holds the taskbar.
+/// The edge is inferred from where the work area is inset; with an auto-hiding taskbar, from the nearest edge.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn flyout_position(tray: Rect, win: (i32, i32), monitor: Rect, work: Rect, margin: i32) -> (i32, i32) {
+    let (ww, wh) = win;
+    let (cx, cy) = (tray.x + tray.w / 2, tray.y + tray.h / 2);
+    let clamp = |v: i32, lo: i32, hi: i32| v.max(lo).min(hi.max(lo));
+    let insets = [
+        (work.y + work.h < monitor.y + monitor.h, monitor.y + monitor.h - cy), // bottom
+        (work.y > monitor.y, cy - monitor.y),                                  // top
+        (work.x > monitor.x, cx - monitor.x),                                  // left
+        (work.x + work.w < monitor.x + monitor.w, monitor.x + monitor.w - cx), // right
+    ];
+    let edge = insets
+        .iter()
+        .position(|(inset, _)| *inset)
+        .unwrap_or_else(|| (0..4).min_by_key(|&i| insets[i].1).unwrap_or(0));
+    let hx = clamp(cx - ww / 2, work.x + margin, work.x + work.w - ww - margin);
+    let vy = clamp(cy - wh / 2, work.y + margin, work.y + work.h - wh - margin);
+    match edge {
+        0 => (hx, work.y + work.h - wh - margin),
+        1 => (hx, work.y + margin),
+        2 => (work.x + margin, vy),
+        _ => (work.x + work.w - ww - margin, vy),
+    }
+}
+
+/// Hides the popover after it loses focus, remembering when so a tray click that caused the blur
+/// doesn't immediately re-open it.
+pub fn hide_window(w: &tauri::WebviewWindow) {
+    *HIDDEN_AT.lock().unwrap() = Some(std::time::Instant::now());
+    let _ = w.hide();
+}
+
+static HIDDEN_AT: Mutex<Option<std::time::Instant>> = Mutex::new(None);
+
 pub fn toggle_window(app: &AppHandle) {
     if let Some(w) = app.get_webview_window("main") {
         if w.is_visible().unwrap_or(false) {
             let _ = w.hide();
         } else {
+            // On Windows, clicking the tray icon blurs (and hides) the flyout before the click arrives.
+            #[cfg(windows)]
+            if HIDDEN_AT.lock().unwrap().is_some_and(|t| t.elapsed() < std::time::Duration::from_millis(300)) {
+                return;
+            }
             show_window(app);
         }
     }
@@ -189,4 +268,39 @@ pub fn should_hide_on_blur() -> bool {
         return false;
     }
     SHOWN_AT.lock().unwrap().is_none_or(|t| t.elapsed() > std::time::Duration::from_millis(400))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const MON: Rect = Rect { x: 0, y: 0, w: 1920, h: 1080 };
+
+    #[test]
+    fn flyout_sits_against_the_taskbar() {
+        let win = (400, 580);
+        // Bottom taskbar (48px), tray near the right.
+        let work = Rect { x: 0, y: 0, w: 1920, h: 1032 };
+        let tray = Rect { x: 1700, y: 1040, w: 32, h: 32 };
+        assert_eq!(flyout_position(tray, win, MON, work, 12), (1508, 1032 - 580 - 12));
+        // Tray at the far right clamps inside the work area.
+        let tray = Rect { x: 1890, y: 1040, w: 24, h: 24 };
+        assert_eq!(flyout_position(tray, win, MON, work, 12).0, 1920 - 400 - 12);
+        // Top taskbar.
+        let work = Rect { x: 0, y: 48, w: 1920, h: 1032 };
+        let tray = Rect { x: 1700, y: 8, w: 32, h: 32 };
+        assert_eq!(flyout_position(tray, win, MON, work, 12), (1508, 60));
+        // Left taskbar.
+        let work = Rect { x: 60, y: 0, w: 1860, h: 1080 };
+        let tray = Rect { x: 10, y: 900, w: 32, h: 32 };
+        assert_eq!(flyout_position(tray, win, MON, work, 12), (72, 1080 - 580 - 12));
+        // Right taskbar, second monitor at negative x.
+        let mon = Rect { x: -1920, y: 0, w: 1920, h: 1080 };
+        let work = Rect { x: -1920, y: 0, w: 1860, h: 1080 };
+        let tray = Rect { x: -40, y: 300, w: 32, h: 32 };
+        assert_eq!(flyout_position(tray, win, mon, work, 12), (-60 - 400 - 12, 26));
+        // Auto-hide bottom taskbar: work area == monitor, infer the edge from the tray.
+        let tray = Rect { x: 1700, y: 1060, w: 20, h: 20 };
+        assert_eq!(flyout_position(tray, win, MON, MON, 12).1, 1080 - 580 - 12);
+    }
 }

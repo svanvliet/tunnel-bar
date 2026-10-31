@@ -32,9 +32,10 @@ pub async fn find_cli(override_path: Option<&str>) -> Option<PathBuf> {
         candidates.push("/usr/local/bin/devtunnel".into());
     }
     #[cfg(windows)]
-    if let Some(local) = dirs::data_local_dir() {
-        candidates.push(local.join("Microsoft/WinGet/Links").join(EXE));
-    }
+    candidates.extend(windows_candidates(
+        dirs::data_local_dir().as_deref(),
+        std::env::var_os("ProgramFiles").map(PathBuf::from).as_deref(),
+    ));
     if let Some(p) = candidates.into_iter().find(|p| p.is_file()) {
         return Some(p);
     }
@@ -54,6 +55,37 @@ pub async fn find_cli(override_path: Option<&str>) -> Option<PathBuf> {
         }
     }
     None
+}
+
+/// Install locations used by winget (user and machine scope, links and unpacked packages) and the MSI/zip.
+#[cfg(any(windows, test))]
+fn windows_candidates(local_appdata: Option<&Path>, program_files: Option<&Path>) -> Vec<PathBuf> {
+    const EXE: &str = "devtunnel.exe";
+    let mut out = vec![];
+    for root in [local_appdata, program_files].into_iter().flatten() {
+        out.push(root.join("Microsoft").join("WinGet").join("Links").join(EXE));
+        out.push(root.join("WinGet").join("Links").join(EXE));
+    }
+    for root in [local_appdata, program_files].into_iter().flatten() {
+        for pkgs in [root.join("Microsoft").join("WinGet").join("Packages"), root.join("WinGet").join("Packages")] {
+            let Ok(rd) = std::fs::read_dir(&pkgs) else { continue };
+            let mut dirs: Vec<PathBuf> = rd
+                .flatten()
+                .filter(|e| e.file_name().to_string_lossy().to_ascii_lowercase().starts_with("microsoft.devtunnel"))
+                .map(|e| e.path())
+                .collect();
+            dirs.sort();
+            out.extend(dirs.into_iter().rev().map(|d| d.join(EXE)));
+        }
+    }
+    if let Some(l) = local_appdata {
+        out.push(l.join("Programs").join("devtunnel").join(EXE));
+    }
+    if let Some(pf) = program_files {
+        out.push(pf.join("devtunnel").join(EXE));
+        out.push(pf.join("Microsoft").join("devtunnel").join(EXE));
+    }
+    out
 }
 
 fn shellexpand_home(p: &str) -> String {
@@ -548,6 +580,22 @@ mod tests {
         );
         let out = CliOutput { success: false, stdout: "'x' was not matched.\nDescription:\n  Update".into(), stderr: String::new() };
         assert_eq!(err_text(&out), "'x' was not matched.");
+    }
+
+    #[test]
+    fn lists_winget_install_locations() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (local, pf) = (tmp.path().join("Local"), tmp.path().join("PF"));
+        let pkgs = local.join("Microsoft").join("WinGet").join("Packages");
+        for d in ["Microsoft.devtunnel_Microsoft.Winget.Source_8wekyb3d8bbwe", "Other.app_x"] {
+            std::fs::create_dir_all(pkgs.join(d)).unwrap();
+        }
+        let c = windows_candidates(Some(&local), Some(&pf));
+        assert_eq!(c[0], local.join("Microsoft/WinGet/Links/devtunnel.exe"));
+        assert!(c.contains(&pkgs.join("Microsoft.devtunnel_Microsoft.Winget.Source_8wekyb3d8bbwe/devtunnel.exe")));
+        assert!(!c.iter().any(|p| p.to_string_lossy().contains("Other.app")));
+        assert!(c.contains(&pf.join("WinGet").join("Links").join("devtunnel.exe")));
+        assert!(windows_candidates(None, None).is_empty());
     }
 
     #[test]

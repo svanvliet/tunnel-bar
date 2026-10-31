@@ -4,7 +4,7 @@
 
 # Tunnel Bar
 
-A macOS menu-bar app for managing [Microsoft Dev Tunnels](https://learn.microsoft.com/azure/developer/dev-tunnels/): connect to tunnels and host your own. It wraps the `devtunnel` CLI, so it uses your existing CLI sign-in.
+A macOS menu-bar and Windows tray app for managing [Microsoft Dev Tunnels](https://learn.microsoft.com/azure/developer/dev-tunnels/): connect to tunnels and host your own. It wraps the `devtunnel` CLI, so it uses your existing CLI sign-in.
 
 ## Features
 
@@ -14,15 +14,15 @@ A macOS menu-bar app for managing [Microsoft Dev Tunnels](https://learn.microsof
 - Connect and disconnect, with auto-reconnect using exponential backoff. Stops retrying on auth errors.
 - Per-tunnel **Auto** connect on launch; launch at login.
 - Detects `devtunnel connect` processes started outside Tunnel Bar, with **Take over** and **Stop**.
-- Shows forwarded ports (`localhost:L → :R`), with Copy SSH (uses your `~/.ssh/config` alias if one matches) and Open SSH (Terminal).
-- Per-tunnel live logs, saved to `~/Library/Logs/TunnelBar/`.
+- Shows forwarded ports (`localhost:L → :R`), with Copy SSH (uses your `~/.ssh/config` alias if one matches) and Open SSH (Terminal on macOS, Windows Terminal or cmd on Windows).
+- Per-tunnel live logs, saved to `~/Library/Logs/TunnelBar/` (`%LOCALAPPDATA%\TunnelBar\logs` on Windows). Settings live in `~/Library/Application Support/me.svv.tunnelbar/` (`%APPDATA%\me.svv.tunnelbar` on Windows).
 - Notifications on unexpected drops and reconnects.
 - Optional local nicknames (double-click a tunnel name).
-- Never orphans connections: stops children on Quit/SIGTERM, and reclaims any left by a crash on next launch.
+- Never orphans connections: stops children on Quit/SIGTERM, and reclaims any left by a crash on next launch. On Windows each child runs in a Job Object, so it dies with Tunnel Bar.
 
 ### Hosting
 
-- **＋ Expose a local port**: creates a tunnel labelled `tunnelbar`, adds the port (http/https/auto), and hosts it from this Mac.
+- **＋ Expose a local port**: creates a tunnel labelled `tunnelbar`, adds the port (http/https/auto), and hosts it from this machine.
 - **Host here** / **Stop hosting** for your own tunnels, with optional **Auto-host** on launch and auto-restart.
 - Shows each hosted port's public URL (open/copy) and Inspect link, and warns when nothing is listening locally.
 - Access control: private (your account) by default; **Make public…** adds anonymous access after confirmation; **Require sign-in** removes it.
@@ -48,8 +48,8 @@ See [docs/phase3-ui-hooks.md](docs/phase3-ui-hooks.md) for the commands and fiel
 
 ## Requirements
 
-- macOS 11+
-- `devtunnel` CLI (`brew install --cask devtunnel`), signed in with `devtunnel user login`
+- macOS 11+, or Windows 10/11 (WebView2 is installed by the installer if missing)
+- `devtunnel` CLI (`brew install --cask devtunnel` / `winget install Microsoft.devtunnel`), signed in with `devtunnel user login`
 
 ## Install
 
@@ -58,6 +58,8 @@ Download the DMG from [Releases](https://github.com/svanvliet/tunnel-bar/release
 ```sh
 xattr -dr com.apple.quarantine "/Applications/Tunnel Bar.app"
 ```
+
+On Windows, run the `Tunnel Bar_<version>_x64-setup.exe` (per-user NSIS) or `.msi` installer. Builds aren't code-signed yet, so SmartScreen may ask you to confirm. The manual (`workflow_dispatch`) CI `windows` job uploads both as the `tunnel-bar-windows` artifact.
 
 ## Build
 
@@ -68,6 +70,8 @@ npm run tauri build   # release .app in src-tauri/target/release/bundle/macos
 codesign --force --deep -s - src-tauri/target/release/"bundle/macos/Tunnel Bar.app"   # ad-hoc sign
 ./scripts/package-macos.sh   # universal DMG + zip in dist/
 ```
+
+On Windows, `npm run tauri build` produces NSIS and MSI installers in `src-tauri/target/release/bundle/{nsis,msi}` (see `src-tauri/tauri.windows.conf.json`).
 
 ### Icon artwork
 
@@ -112,5 +116,5 @@ cd .. && npm run check
 1. ~~Phase 1 – connection management MVP~~ (v0.1.0)
 2. ~~Phase 2 – hosting (`devtunnel host`) from the menu bar~~ (v0.2.0)
 3. Phase 3 – tunnel management (create, delete, ports, labels, expiration, sign-in, stable ports, hotkey, label filter): backend done, UI in progress
-4. Phase 4 – Windows tray version
+4. Phase 4 – Windows tray version: cross-checked on macOS, awaiting a build and testing on a PC
 5. Phase 5 – signed/notarized DMG, auto-update, CI releases

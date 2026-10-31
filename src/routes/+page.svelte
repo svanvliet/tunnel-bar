@@ -7,6 +7,12 @@
   import type { Snapshot, TunnelView, LogLine, Forward, HostedPort } from "$lib/types";
   import { stateLabel, hostLabel, tone, isActive } from "$lib/types";
 
+  // Platform hook for CSS ([data-platform="windows"]) and wording.
+  const isWindows = typeof navigator !== "undefined" && navigator.userAgent.includes("Windows");
+  const thisMachine = isWindows ? "this PC" : "this Mac";
+  const installHint = isWindows ? "winget install Microsoft.devtunnel" : "brew install --cask devtunnel";
+  if (typeof document !== "undefined") document.documentElement.dataset.platform = isWindows ? "windows" : "macos";
+
   let snap = $state<Snapshot | null>(null);
   let view = $state<"list" | "logs" | "settings" | "expose">("list");
   // Inline confirmation for risky per-tunnel actions (webview confirm() is unavailable).
@@ -180,7 +186,7 @@
       <p class="empty">Loading…</p>
     {:else if !snap.cliPath}
       <div class="banner bad">
-        devtunnel CLI not found. Install it (<code>brew install --cask devtunnel</code>) or set its path in Settings.
+        devtunnel CLI not found. Install it (<code>{installHint}</code>) or set its path in Settings.
       </div>
     {:else if snap.auth && !snap.auth.loggedIn}
       <div class="banner bad">
@@ -207,7 +213,7 @@
               <button class="name" title="Rename (local nickname)" ondblclick={() => startEdit(t)}>{t.displayName}</button>
             {/if}
             {#if hostOn(t)}
-              <span class="host online" title="This Mac is hosting the tunnel">hosting here</span>
+              <span class="host online" title="{isWindows ? 'This PC' : 'This Mac'} is hosting the tunnel">hosting here</span>
             {:else}
               <span class="host" class:online={t.summary.hostConnections > 0}
                 title={t.summary.hostConnections > 0 ? "Host is online" : "Host is offline"}>
@@ -232,7 +238,7 @@
               <ul class="fwd hosted">
                 {#each t.hostedPorts as p (p.port)}
                   <li>
-                    <span title="Local port served by this Mac">:{p.port}</span>
+                    <span title="Local port served by {thisMachine}">:{p.port}</span>
                     <span class="arrow">→</span>
                     {#if p.uri}
                       <button class="link url" title={`Open ${p.uri}`} onclick={() => call("open_url", { url: p.uri })}>{p.uri.replace(/^https:\/\//, "").replace(/\/$/, "")}</button>
@@ -326,7 +332,7 @@
               {#if t.hostState.kind === "connected" || t.hostState.kind === "connecting" || t.hostState.kind === "reconnecting" || t.hostState.kind === "backoff" || t.hostState.kind === "authRequired"}
                 <button class="danger" onclick={() => call("stop_host", { id: t.id })}>Stop hosting</button>
               {:else if canHost(t)}
-                <button class="ghost" title="Serve this tunnel's ports from this Mac" onclick={() => call("host", { id: t.id })}>Host here</button>
+                <button class="ghost" title="Serve this tunnel's ports from {thisMachine}" onclick={() => call("host", { id: t.id })}>Host here</button>
               {/if}
             {/if}
             <span class="spacer"></span>
@@ -393,7 +399,7 @@
         <!-- svelte-ignore a11y_autofocus -->
         <input bind:value={exposePort} autofocus inputmode="numeric" placeholder="3000"
           onkeydown={(e) => { if (e.key === "Enter") submitExpose(); }} />
-        <div class="hint">Tunnel Bar creates a tunnel labelled “tunnelbar”, adds this port, and hosts it from this Mac.</div>
+        <div class="hint">Tunnel Bar creates a tunnel labelled “tunnelbar”, adds this port, and hosts it from {thisMachine}.</div>
       </div>
       <div class="field">
         <span>Tunnel name <span class="optional">(optional)</span></span>
