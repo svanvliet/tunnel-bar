@@ -133,9 +133,18 @@ pub fn parse_show(stdout: &str) -> Result<TunnelDetails, String> {
         .map_err(|e| format!("could not parse `devtunnel show -j`: {e}"))
 }
 
-fn err_text(out: &CliOutput) -> String {
+/// First few meaningful lines of a failure (service errors put the detail on line 2).
+pub fn err_text(out: &CliOutput) -> String {
     let t = if out.stderr.trim().is_empty() { &out.stdout } else { &out.stderr };
-    t.trim().lines().next().unwrap_or("devtunnel failed").to_string()
+    let lines: Vec<&str> = t
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty() && !l.starts_with("Request ID:"))
+        .take_while(|l| !l.starts_with("Description:") && !l.starts_with("Usage:"))
+        .take(3)
+        .map(|l| l.trim_start_matches(':').trim())
+        .collect();
+    if lines.is_empty() { "devtunnel failed".into() } else { lines.join(" ") }
 }
 
 pub async fn list(cli: &Path) -> Result<Vec<TunnelSummary>, String> {
@@ -179,15 +188,88 @@ pub fn parse_create(stdout: &str) -> Result<String, String> {
         .map_err(|e| format!("could not parse `devtunnel create -j`: {e}"))
 }
 
-/// Creates a tunnel with a CLI-generated id; returns "name.cluster".
-pub async fn create(cli: &Path, id: Option<&str>, labels: &[&str], description: &str) -> Result<String, String> {
+pub fn create_args<'a>(id: Option<&'a str>, labels: &[&'a str], description: &'a str, expiration: Option<&'a str>) -> Vec<&'a str> {
     let mut args = vec!["create"];
     args.extend(id);
     args.extend(["-j", "-d", description]);
     for l in labels {
         args.extend(["-l", l]);
     }
-    parse_create(&ok(cli, &args).await?)
+    if let Some(e) = expiration {
+        args.extend(["-e", e]);
+    }
+    args
+}
+
+/// Creates a tunnel (CLI-generated id when `id` is None); returns "name.cluster".
+pub async fn create(
+    cli: &Path,
+    id: Option<&str>,
+    labels: &[&str],
+    description: &str,
+    expiration: Option<&str>,
+) -> Result<String, String> {
+    parse_create(&ok(cli, &create_args(id, labels, description, expiration)).await?)
+}
+
+/// Builds `devtunnel update` args; None if there's nothing to change.
+pub fn update_args<'a>(id: &'a str, req: &'a crate::model::UpdateTunnelRequest) -> Option<Vec<&'a str>> {
+    let mut args = vec!["update", id, "-j"];
+    if let Some(d) = &req.description {
+        args.extend(["-d", d.as_str()]);
+    }
+    for l in &req.add_labels {
+        args.extend(["--add-labels", l.as_str()]);
+    }
+    for l in &req.remove_labels {
+        args.extend(["--remove-labels", l.as_str()]);
+    }
+    if let Some(e) = &req.expiration {
+        args.extend(["-e", e.as_str()]);
+    }
+    (args.len() > 3).then_some(args)
+}
+
+pub async fn update(cli: &Path, id: &str, req: &crate::model::UpdateTunnelRequest) -> Result<(), String> {
+    match update_args(id, req) {
+        Some(args) => ok(cli, &args).await.map(|_| ()),
+        None => Ok(()),
+    }
+}
+
+pub async fn port_delete(cli: &Path, id: &str, port: u16) -> Result<(), String> {
+    let port = port.to_string();
+    ok(cli, &["port", "delete", id, "-p", &port, "-j"]).await.map(|_| ())
+}
+
+pub async fn logout(cli: &Path) -> Result<(), String> {
+    ok(cli, &["user", "logout"]).await.map(|_| ())
+}
+
+pub fn login_args(provider: crate::model::LoginProvider, device_code: bool) -> Vec<&'static str> {
+    let mut args = vec!["user", "login"];
+    args.push(match provider {
+        crate::model::LoginProvider::Microsoft => "-e",
+        crate::model::LoginProvider::Github => "-g",
+    });
+    if device_code {
+        args.push("-d");
+    }
+    args
+}
+
+/// Extracts (url, code) from a device-code prompt such as
+/// "To sign in, use a web browser to open the page https://microsoft.com/devicelogin and enter the code ABC123 to authenticate."
+pub fn parse_device_code(line: &str) -> Option<(String, String)> {
+    static URL: once_cell::sync::Lazy<regex::Regex> =
+        once_cell::sync::Lazy::new(|| regex::Regex::new(r"https://[^\s'\x22]+").unwrap());
+    static CODE: once_cell::sync::Lazy<regex::Regex> = once_cell::sync::Lazy::new(|| {
+        regex::Regex::new(r"\b(?i:enter|use|input)\s+(?i:the\s+)?(?i:one-time\s+)?(?i:code):?\s+([A-Z0-9]{4,}(?:-[A-Z0-9]{4,})?)\b")
+            .unwrap()
+    });
+    let url = URL.find(line)?.as_str().trim_end_matches(['.', ',', ')']).to_string();
+    let code = CODE.captures(line)?.get(1)?.as_str().to_string();
+    Some((url, code))
 }
 
 /// Mirrors the service's rule for requested tunnel IDs (TunnelConstraints.NewTunnelIdPattern).
@@ -252,6 +334,54 @@ mod tests {
         for bad in ["ab", "-abc", "abc-", "My-App", "a_b", "a.b", &"a".repeat(50)] {
             assert!(validate_tunnel_id(bad).is_err(), "{bad}");
         }
+    }
+
+    #[test]
+    fn builds_create_update_and_login_args() {
+        assert_eq!(
+            create_args(Some("x"), &["tunnelbar", "a"], "d", Some("8h")),
+            ["create", "x", "-j", "-d", "d", "-l", "tunnelbar", "-l", "a", "-e", "8h"]
+        );
+        assert_eq!(create_args(None, &[], "", None), ["create", "-j", "-d", ""]);
+        let req = crate::model::UpdateTunnelRequest {
+            description: Some(String::new()),
+            add_labels: vec!["a".into(), "b".into()],
+            remove_labels: vec!["c".into()],
+            expiration: Some("2d".into()),
+        };
+        assert_eq!(
+            update_args("t", &req).unwrap(),
+            ["update", "t", "-j", "-d", "", "--add-labels", "a", "--add-labels", "b", "--remove-labels", "c", "-e", "2d"]
+        );
+        assert!(update_args("t", &Default::default()).is_none());
+        use crate::model::LoginProvider::*;
+        assert_eq!(login_args(Microsoft, false), ["user", "login", "-e"]);
+        assert_eq!(login_args(Github, true), ["user", "login", "-g", "-d"]);
+    }
+
+    #[test]
+    fn parses_device_code_prompts() {
+        let ms = "To sign in, use a web browser to open the page https://microsoft.com/devicelogin and enter the code F7QRSTUVW to authenticate.";
+        assert_eq!(parse_device_code(ms), Some(("https://microsoft.com/devicelogin".into(), "F7QRSTUVW".into())));
+        let gh = "Copy your one-time code: 1A2B-3C4D. Then open https://github.com/login/device and use the code 1A2B-3C4D";
+        assert_eq!(parse_device_code(gh), Some(("https://github.com/login/device".into(), "1A2B-3C4D".into())));
+        assert_eq!(parse_device_code("Logged in as a@b.com using Microsoft."), None);
+        assert_eq!(parse_device_code("Browse to https://example.com"), None);
+    }
+
+    #[test]
+    fn error_text_keeps_service_detail() {
+        let out = CliOutput {
+            success: false,
+            stdout: String::new(),
+            stderr: "Tunnel service error: One or more validation errors occurred. \n: Invalid custom expiration. Value must be between 1 hour to 30 days\nRequest ID: abc\n".into(),
+        };
+        assert_eq!(
+            err_text(&out),
+            "Tunnel service error: One or more validation errors occurred. Invalid custom expiration. Value must be between 1 hour to 30 days"
+        );
+        let out = CliOutput { success: false, stdout: "'x' was not matched.\nDescription:\n  Update".into(), stderr: String::new() };
+        assert_eq!(err_text(&out), "'x' was not matched.");
     }
 
     #[test]

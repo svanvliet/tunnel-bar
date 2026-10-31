@@ -52,6 +52,7 @@ pub struct TunnelDetails {
     pub description: String,
     pub ports: Vec<TunnelPort>,
     pub access_control: Vec<AccessEntry>,
+    pub tunnel_expiration: String,
 }
 
 /// A local listener forwarding to a remote tunnel port.
@@ -117,6 +118,8 @@ pub struct TunnelSettings {
     pub auto_host: bool,
     /// ~/.ssh/config Host alias to use for "Open SSH" (port is overridden with -p).
     pub ssh_host: Option<String>,
+    /// Stable local ports: remote port -> local port served by Tunnel Bar's proxy while connected.
+    pub pinned_ports: BTreeMap<u16, u16>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -127,7 +130,13 @@ pub struct Settings {
     pub notifications: bool,
     pub first_run_done: bool,
     pub tunnels: BTreeMap<String, TunnelSettings>,
+    /// Global shortcut (Tauri accelerator syntax) that toggles the popover; None disables it.
+    pub hotkey: Option<String>,
+    /// Show only tunnels carrying any of these labels (empty = all).
+    pub label_filter: Vec<String>,
 }
+
+pub const DEFAULT_HOTKEY: &str = "CmdOrCtrl+Alt+Shift+T";
 
 impl Default for Settings {
     fn default() -> Self {
@@ -137,6 +146,8 @@ impl Default for Settings {
             notifications: true,
             first_run_done: false,
             tunnels: BTreeMap::new(),
+            hotkey: Some(DEFAULT_HOTKEY.into()),
+            label_filter: Vec::new(),
         }
     }
 }
@@ -168,6 +179,89 @@ pub struct TunnelView {
     pub created_by_app: bool,
     /// A host other than this app's is connected to the relay.
     pub hosted_elsewhere: bool,
+    /// Tunnel lifetime from the service (e.g. "30 days" -> 720); None if unknown.
+    pub expiration_hours: Option<u32>,
+    /// Matches `Settings.label_filter` (always true when the filter is empty).
+    pub matches_filter: bool,
+    /// Stable-port proxies configured for this tunnel.
+    pub pins: Vec<PinView>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct PinView {
+    pub remote_port: u16,
+    pub local_port: u16,
+    /// The proxy is listening on `local_port`.
+    pub listening: bool,
+    /// Current `devtunnel connect` local port the proxy forwards to.
+    pub target_port: Option<u16>,
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+#[serde(rename_all = "camelCase", default)]
+pub struct PortSpec {
+    pub port: u16,
+    /// "http", "https" or "auto" (default).
+    pub protocol: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+#[serde(rename_all = "camelCase", default)]
+pub struct CreateTunnelRequest {
+    /// Custom tunnel id; the CLI generates one when None.
+    pub tunnel_id: Option<String>,
+    pub description: String,
+    /// Extra labels; `tunnelbar` is always added.
+    pub labels: Vec<String>,
+    /// e.g. "8h" or "30d" (1h..30d); service default (30 days) when None.
+    pub expiration: Option<String>,
+    pub ports: Vec<PortSpec>,
+    pub anonymous: bool,
+    /// Start hosting from this Mac after creating.
+    pub host: bool,
+    pub nickname: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+#[serde(rename_all = "camelCase", default)]
+pub struct UpdateTunnelRequest {
+    pub description: Option<String>,
+    pub add_labels: Vec<String>,
+    pub remove_labels: Vec<String>,
+    pub expiration: Option<String>,
+}
+
+/// What deleting a tunnel would require; lets the UI ask before calling `delete_tunnel`.
+#[derive(Debug, Clone, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct DeletePreflight {
+    pub created_by_app: bool,
+    /// Pass `confirm: true` (tunnel isn't labelled `tunnelbar`).
+    pub needs_confirm: bool,
+    /// Pass `allowHostedElsewhere: true` (another machine is hosting it).
+    pub hosted_elsewhere: bool,
+    pub hosting_here: bool,
+    pub connected_here: bool,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "camelCase")]
+pub enum LoginProvider {
+    #[default]
+    Microsoft,
+    Github,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq)]
+#[serde(tag = "kind", rename_all = "camelCase", rename_all_fields = "camelCase")]
+pub enum LoginState {
+    /// `devtunnel user login` is running (browser flow, or waiting for the device code).
+    Running { provider: LoginProvider },
+    DeviceCode { provider: LoginProvider, url: String, code: String },
+    Succeeded { message: String },
+    Failed { message: String },
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
@@ -182,6 +276,47 @@ pub struct HostedPort {
 }
 
 pub const APP_LABEL: &str = "tunnelbar";
+
+/// "30 days" -> 720, "1 hours" -> 1, "12h" -> 12, "2d" -> 48.
+pub fn parse_expiration_hours(s: &str) -> Option<u32> {
+    let s = s.trim().to_ascii_lowercase();
+    let split = s.find(|c: char| !c.is_ascii_digit())?;
+    let n: u32 = s[..split].parse().ok()?;
+    match s[split..].trim() {
+        "h" | "hour" | "hours" => Some(n),
+        "d" | "day" | "days" => n.checked_mul(24),
+        _ => None,
+    }
+}
+
+/// Normalizes a user expiration ("8h", "30 d", "2 days") to the CLI form, enforcing 1h..30d.
+pub fn normalize_expiration(s: &str) -> Result<String, String> {
+    let hours = parse_expiration_hours(s).ok_or_else(|| format!("Invalid expiration “{s}”. Use hours or days, e.g. 8h or 30d."))?;
+    if !(1..=720).contains(&hours) {
+        return Err("Expiration must be between 1 hour and 30 days.".into());
+    }
+    Ok(if hours % 24 == 0 { format!("{}d", hours / 24) } else { format!("{hours}h") })
+}
+
+/// Service rule: `[\w-=]{1,50}`.
+pub fn validate_label(l: &str) -> Result<(), String> {
+    let ok = (1..=50).contains(&l.chars().count()) && l.chars().all(|c| c.is_alphanumeric() || "_-=".contains(c));
+    if ok { Ok(()) } else { Err(format!("Invalid label “{l}”: use 1–50 letters, digits, _, - or =.")) }
+}
+
+pub fn validate_protocol(p: &str) -> Result<&'static str, String> {
+    match p.trim().to_ascii_lowercase().as_str() {
+        "" | "auto" => Ok("auto"),
+        "http" => Ok("http"),
+        "https" => Ok("https"),
+        other => Err(format!("Unsupported protocol {other}; use http, https or auto.")),
+    }
+}
+
+/// True when `filter` is empty or the tunnel carries any of its labels.
+pub fn matches_label_filter(labels: &[String], filter: &[String]) -> bool {
+    filter.is_empty() || filter.iter().any(|f| labels.iter().any(|l| l.eq_ignore_ascii_case(f)))
+}
 
 /// "https://abc-3000.usw3.devtunnels.ms/" -> "https://abc-3000-inspect.usw3.devtunnels.ms/"
 pub fn inspect_uri(port_uri: &str) -> String {
@@ -204,6 +339,12 @@ pub struct Snapshot {
     pub refresh_error: Option<String>,
     pub refreshing: bool,
     pub log_dir: String,
+    /// Sorted, de-duplicated labels across all tunnels (for the label filter).
+    pub all_labels: Vec<String>,
+    /// In-app sign-in progress; None when no login has been started this session.
+    pub login: Option<LoginState>,
+    /// Why the global hotkey couldn't be registered.
+    pub hotkey_error: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -222,6 +363,51 @@ mod tests {
     fn derives_inspect_uri() {
         assert_eq!(inspect_uri("https://abc-18765.usw3.devtunnels.ms/"), "https://abc-18765-inspect.usw3.devtunnels.ms/");
         assert_eq!(inspect_uri(""), "");
+    }
+
+    #[test]
+    fn parses_and_normalizes_expiration() {
+        assert_eq!(parse_expiration_hours("30 days"), Some(720));
+        assert_eq!(parse_expiration_hours("1 hours"), Some(1));
+        assert_eq!(parse_expiration_hours("2d"), Some(48));
+        assert_eq!(parse_expiration_hours(""), None);
+        assert_eq!(parse_expiration_hours("soon"), None);
+        assert_eq!(normalize_expiration("48h").unwrap(), "2d");
+        assert_eq!(normalize_expiration(" 8 H ").unwrap(), "8h");
+        assert!(normalize_expiration("31d").is_err());
+        assert!(normalize_expiration("0h").is_err());
+    }
+
+    #[test]
+    fn validates_inputs() {
+        assert!(validate_label("team-a=1_x").is_ok());
+        assert!(validate_label("bad label").is_err());
+        assert!(validate_label("").is_err());
+
+
+        assert_eq!(validate_protocol("HTTP").unwrap(), "http");
+        assert_eq!(validate_protocol("").unwrap(), "auto");
+        assert!(validate_protocol("tcp").is_err());
+    }
+
+    #[test]
+    fn filters_by_label() {
+        let l = vec!["tunnelbar".to_string(), "Work".to_string()];
+        assert!(matches_label_filter(&l, &[]));
+        assert!(matches_label_filter(&l, &["work".into()]));
+        assert!(!matches_label_filter(&l, &["home".into()]));
+        assert!(!matches_label_filter(&[], &["home".into()]));
+    }
+
+    #[test]
+    fn settings_default_and_backcompat() {
+        let s: Settings = serde_json::from_str(r#"{"launchAtLogin":false,"tunnels":{"a":{"autoConnect":true}}}"#).unwrap();
+        assert_eq!(s.hotkey.as_deref(), Some(DEFAULT_HOTKEY));
+        assert!(s.label_filter.is_empty());
+        assert!(s.tunnels["a"].pinned_ports.is_empty());
+        let s: Settings = serde_json::from_str(r#"{"hotkey":null,"tunnels":{"a":{"pinnedPorts":{"2222":2222}}}}"#).unwrap();
+        assert_eq!(s.hotkey, None);
+        assert_eq!(s.tunnels["a"].pinned_ports[&2222], 2222);
     }
 
     #[test]

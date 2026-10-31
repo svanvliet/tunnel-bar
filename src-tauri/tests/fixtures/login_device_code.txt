@@ -1,0 +1,2 @@
+Using device code authentication.
+To sign in, use a web browser to open the page https://microsoft.com/devicelogin and enter the code F7QRSTUVW to authenticate.

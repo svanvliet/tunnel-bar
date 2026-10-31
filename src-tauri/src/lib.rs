@@ -2,10 +2,15 @@ mod app;
 mod cli;
 mod commands;
 mod external;
+mod hotkey;
 mod icon;
+mod login;
+#[cfg(all(test, unix))]
+mod live_tests;
 mod logs;
 mod model;
 mod parser;
+mod pin;
 mod settings;
 mod ssh;
 mod supervisor;
@@ -22,6 +27,7 @@ pub fn run() {
         .plugin(tauri_plugin_clipboard_manager::init())
         .plugin(tauri_plugin_positioner::init())
         .plugin(tauri_plugin_opener::init())
+        .plugin(hotkey::plugin())
         .setup(|app| {
             #[cfg(target_os = "macos")]
             app.set_activation_policy(tauri::ActivationPolicy::Accessory);
@@ -50,6 +56,12 @@ pub fn run() {
                 if let Err(e) = commands::apply_autostart(app.handle(), launch) {
                     state.logs.push("_app", "app", &format!("autostart: {e}"));
                 }
+            }
+
+            let hk = state.settings.lock().unwrap().hotkey.clone();
+            if let Err(e) = hotkey::apply(app.handle(), hk.as_deref()) {
+                state.logs.push("_app", "app", &format!("hotkey: {e}"));
+                *state.hotkey_error.lock().unwrap() = Some(e);
             }
 
             if let Some(w) = app.get_webview_window("main") {
@@ -109,6 +121,17 @@ pub fn run() {
             commands::expose_port,
             commands::set_anonymous,
             commands::delete_tunnel,
+            commands::delete_preflight,
+            commands::create_tunnel,
+            commands::update_tunnel,
+            commands::add_port,
+            commands::remove_port,
+            commands::set_pinned_port,
+            commands::set_label_filter,
+            commands::start_login,
+            commands::cancel_login,
+            commands::logout,
+            commands::set_hotkey,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application");

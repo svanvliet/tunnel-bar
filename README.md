@@ -24,6 +24,21 @@ A macOS menu-bar app for managing [Microsoft Dev Tunnels](https://learn.microsof
 - Access control: private (your account) by default; **Make public…** adds anonymous access after confirmation; **Require sign-in** removes it.
 - Delete tunnels that Tunnel Bar created. Tunnels hosted by another machine (e.g. a dev box) are never hosted or deleted from here.
 
+### Management (Phase 3: backend ready, UI in progress)
+
+- Create tunnels with an id, description, labels, an expiration (1h–30d), ports, public access and hosting. Tunnel Bar always adds the `tunnelbar` label.
+- Edit labels, description and expiration. Shows each tunnel's lifetime.
+- Add and remove ports. Tunnel Bar restarts its host so the change takes effect.
+- Delete tunnels.
+  - Deleting a tunnel Tunnel Bar didn't create needs explicit confirmation.
+  - A tunnel hosted by another machine also needs a separate override.
+- In-app sign-in (Microsoft or GitHub, with a browser or device-code flow) and sign-out.
+- **Stable local ports**: pin a remote port to a fixed `localhost` port. Tunnel Bar runs a small loopback proxy to whichever port `devtunnel connect` picked. A static `~/.ssh/config` `Port` then keeps working across reconnects, and Copy/Open SSH use the pin.
+- A global hotkey toggles the popover. The default is ⌘⌥⇧T, and it can be configured or disabled.
+- Filter tunnels by label.
+
+See [docs/phase3-ui-hooks.md](docs/phase3-ui-hooks.md) for the commands and fields.
+
 ## Requirements
 
 - macOS 11+
@@ -55,6 +70,7 @@ cargo test                         # unit + fake-CLI supervisor tests
 cargo clippy --all-targets -- -D warnings
 TUNNELBAR_LIVE_TUNNEL=<tunnel-id> cargo test live_connect -- --ignored --nocapture   # real CLI
 TUNNELBAR_LIVE_HOST=<tunnel-id> cargo test live_host -- --ignored --nocapture   # tunnel with an http port served locally
+cargo test live_manage -- --ignored --nocapture   # creates/edits/hosts/pins/deletes a temporary tunnelbar-test-* tunnel (1h expiry)
 cd .. && npm run check
 ```
 
@@ -71,6 +87,6 @@ cd .. && npm run check
 
 1. ~~Phase 1 – connection management MVP~~ (v0.1.0)
 2. ~~Phase 2 – hosting (`devtunnel host`) from the menu bar~~ (v0.2.0)
-3. Phase 3 – tunnel management (create, delete, ports, access)
+3. Phase 3 – tunnel management (create, delete, ports, labels, expiration, sign-in, stable ports, hotkey, label filter): backend done, UI in progress
 4. Phase 4 – Windows tray version
 5. Phase 5 – signed/notarized DMG, auto-update, CI releases

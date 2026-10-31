@@ -9,7 +9,13 @@ export type ConnState =
 
 export interface Forward { localPort: number; remotePort: number }
 export interface TunnelPort { portNumber: number; protocol: string; portUri: string }
-export interface TunnelSettings { nickname?: string | null; autoConnect: boolean; autoHost: boolean; sshHost?: string | null }
+export interface TunnelSettings {
+  nickname?: string | null; autoConnect: boolean; autoHost: boolean; sshHost?: string | null;
+  /** Stable local ports: remote port -> local port (keys are stringified numbers). Prefer `set_pinned_port`. */
+  pinnedPorts?: Record<string, number>;
+}
+/** A stable-port proxy: `localPort` always forwards to the port `devtunnel connect` picked for `remotePort`. */
+export interface PinView { remotePort: number; localPort: number; listening: boolean; targetPort?: number | null; error?: string | null }
 export interface HostedPort { port: number; protocol: string; uri: string; inspectUri: string; listening: boolean }
 export interface TunnelSummary {
   tunnelId: string; name: string; hostConnections: number; labels: string[];
@@ -19,16 +25,70 @@ export interface TunnelView {
   id: string; displayName: string; summary: TunnelSummary; ports: TunnelPort[];
   state: ConnState; forwards: Forward[]; settings: TunnelSettings; orphaned: boolean;
   hostState: ConnState; hostedPorts: HostedPort[]; anonymous: boolean; createdByApp: boolean; hostedElsewhere: boolean;
+  /** Tunnel lifetime in hours (e.g. 720 for "30 days"); null if unknown. */
+  expirationHours?: number | null;
+  /** False when `settings.labelFilter` is set and this tunnel has none of those labels. */
+  matchesFilter: boolean;
+  pins: PinView[];
 }
 export interface Settings {
   cliPath?: string | null; launchAtLogin: boolean; notifications: boolean;
   firstRunDone: boolean; tunnels: Record<string, TunnelSettings>;
+  /** Global shortcut (Tauri accelerator) that toggles the popover; null = disabled. Change via `set_hotkey`. */
+  hotkey?: string | null;
+  /** Show only tunnels with any of these labels (empty = all). Change via `set_label_filter`. */
+  labelFilter: string[];
 }
 export interface Snapshot {
   cliPath?: string | null; cliVersion?: string | null;
   auth?: { loggedIn: boolean; message: string } | null;
   tunnels: TunnelView[]; settings: Settings; lastRefresh?: string | null;
   refreshError?: string | null; refreshing: boolean; logDir: string;
+  allLabels: string[];
+  login?: LoginState | null;
+  hotkeyError?: string | null;
+}
+
+export interface PortSpec { port: number; protocol?: "http" | "https" | "auto" | "" }
+export interface CreateTunnelRequest {
+  tunnelId?: string | null; description?: string; labels?: string[];
+  /** "8h", "30d", … (1h–30d); service default (30 days) when omitted. */
+  expiration?: string | null;
+  ports?: PortSpec[]; anonymous?: boolean; host?: boolean; nickname?: string | null;
+}
+export interface UpdateTunnelRequest {
+  /** null/omitted = unchanged; "" clears it. */
+  description?: string | null;
+  addLabels?: string[]; removeLabels?: string[];
+  expiration?: string | null;
+}
+export interface DeletePreflight {
+  createdByApp: boolean; needsConfirm: boolean; hostedElsewhere: boolean; hostingHere: boolean; connectedHere: boolean;
+}
+export type LoginProvider = "microsoft" | "github";
+export type LoginState =
+  | { kind: "running"; provider: LoginProvider }
+  | { kind: "deviceCode"; provider: LoginProvider; url: string; code: string }
+  | { kind: "succeeded"; message: string }
+  | { kind: "failed"; message: string };
+
+/** Error-message prefixes from delete_tunnel / add_port / remove_port: retry with the matching flag after asking. */
+export const CONFIRM_REQUIRED = "CONFIRM_REQUIRED: ";
+export const HOSTED_ELSEWHERE = "HOSTED_ELSEWHERE: ";
+export const DEFAULT_HOTKEY = "CmdOrCtrl+Alt+Shift+T";
+
+export function errorKind(e: unknown): "confirm" | "hostedElsewhere" | null {
+  const m = String(e);
+  if (m.includes(CONFIRM_REQUIRED)) return "confirm";
+  if (m.includes(HOSTED_ELSEWHERE)) return "hostedElsewhere";
+  return null;
+}
+export const stripErrorPrefix = (e: unknown) => String(e).replace(CONFIRM_REQUIRED, "").replace(HOSTED_ELSEWHERE, "");
+
+export function expirationLabel(hours?: number | null): string | null {
+  if (hours == null) return null;
+  if (hours % 24 === 0) return `${hours / 24} day${hours === 24 ? "" : "s"}`;
+  return `${hours} hour${hours === 1 ? "" : "s"}`;
 }
 export interface LogLine { ts: string; stream: string; text: string }
 

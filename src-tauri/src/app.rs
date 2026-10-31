@@ -5,7 +5,8 @@ use crate::icon::TrayState;
 use crate::logs::LogStore;
 use crate::model::*;
 use crate::supervisor::{SupEvent, Supervisor};
-use crate::{cli, settings};
+use crate::pin::Pins;
+use crate::{cli, login, settings};
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -41,7 +42,29 @@ pub struct AppState {
     /// Tunnels that dropped and haven't been restored yet (for "restored" notifications).
     pub dropped: Mutex<HashSet<String>>,
     refresh_lock: tokio::sync::Mutex<()>,
+    /// Stable-port proxies for connected tunnels.
+    pub pins: Pins,
+    pub login: Mutex<Option<LoginState>>,
+    login_cancel: Mutex<Option<Arc<tokio::sync::Notify>>>,
+    pub hotkey_error: Mutex<Option<String>>,
 }
+
+/// Why a delete must be refused, given what the caller acknowledged.
+pub fn check_delete(p: &DeletePreflight, confirm: bool, allow_hosted_elsewhere: bool) -> Result<(), String> {
+    if p.hosted_elsewhere && !allow_hosted_elsewhere {
+        return Err(format!(
+            "{HOSTED_ELSEWHERE}This tunnel is hosted by another machine (e.g. a dev box); deleting it would cut that machine off."
+        ));
+    }
+    if p.needs_confirm && !confirm {
+        return Err(format!("{CONFIRM_REQUIRED}This tunnel wasn't created by Tunnel Bar. Confirm to delete it permanently."));
+    }
+    Ok(())
+}
+
+/// Error prefixes the UI can match to offer a confirmation and retry with the matching flag.
+pub const CONFIRM_REQUIRED: &str = "CONFIRM_REQUIRED: ";
+pub const HOSTED_ELSEWHERE: &str = "HOSTED_ELSEWHERE: ";
 
 pub type Shared = Arc<AppState>;
 
@@ -55,9 +78,18 @@ impl AppState {
                     s.on_supervisor_event(ev);
                 }
             });
+            let supervisor = Supervisor::new(logs.clone(), listener.clone()).with_pidfile(settings::pidfile_path());
+            let sup2 = supervisor.clone();
+            let resolve: crate::pin::Resolver = Arc::new(move |id, remote| {
+                sup2.state(id).1.iter().find(|f| f.remote_port == remote).map(|f| f.local_port)
+            });
             AppState {
                 app: app.clone(),
-                supervisor: Supervisor::new(logs.clone(), listener.clone()).with_pidfile(settings::pidfile_path()),
+                pins: Pins::new(resolve),
+                login: Mutex::new(None),
+                login_cancel: Mutex::new(None),
+                hotkey_error: Mutex::new(None),
+                supervisor,
                 hoster: Supervisor::with_role(Role::Host, logs.clone(), listener)
                     .with_pidfile(settings::hosts_pidfile_path()),
                 logs,
@@ -121,7 +153,18 @@ impl AppState {
                 let hosted_elsewhere = !hosting_here
                     && !matches!(host_state, ConnState::External { .. })
                     && summary.as_ref().is_some_and(|s| s.host_connections > 0);
+                let tunnel_settings = settings.tunnels.get(id).cloned().unwrap_or_default();
+                let expiration = details
+                    .map(|d| d.tunnel_expiration.as_str())
+                    .filter(|e| !e.is_empty())
+                    .or(summary.as_ref().map(|s| s.tunnel_expiration.as_str()));
                 TunnelView {
+                    expiration_hours: expiration.and_then(parse_expiration_hours),
+                    matches_filter: matches_label_filter(
+                        summary.as_ref().map(|s| s.labels.as_slice()).unwrap_or_default(),
+                        &settings.label_filter,
+                    ),
+                    pins: tunnel_settings.pinned_ports.iter().map(|(&r, &l)| self.pins.view(id, r, l)).collect(),
                     host_state,
                     hosted_ports,
                     hosted_elsewhere,
@@ -134,11 +177,17 @@ impl AppState {
                     ports,
                     state,
                     forwards,
-                    settings: settings.tunnels.get(id).cloned().unwrap_or_default(),
+                    settings: tunnel_settings,
                 }
             })
             .collect();
+        let mut all_labels: Vec<String> = cache.summaries.iter().flat_map(|s| s.labels.iter().cloned()).collect();
+        all_labels.sort_by_key(|l| l.to_lowercase());
+        all_labels.dedup_by(|a, b| a.eq_ignore_ascii_case(b));
         Snapshot {
+            all_labels,
+            login: self.login.lock().unwrap().clone(),
+            hotkey_error: self.hotkey_error.lock().unwrap().clone(),
             cli_path: cache.cli.as_ref().map(|p| p.display().to_string()),
             cli_version: cache.cli_version.clone(),
             auth: cache.auth.clone(),
@@ -175,6 +224,7 @@ impl AppState {
                 let _ = self.app.emit("log", serde_json::json!({ "id": id, "line": line }));
             }
             SupEvent::Changed { role: Role::Connect, id, prev, next } => {
+                self.sync_pins(None);
                 self.handle_transition(&id, &prev, &next);
                 self.publish();
             }
@@ -383,7 +433,51 @@ impl AppState {
             return Err(format!("Already connected outside Tunnel Bar (PID {pid}). Use “Take over” to manage it."));
         }
         let cli = self.cli_path().await.ok_or("devtunnel CLI not found")?;
+        // Claim pinned ports first so `devtunnel connect` picks other local ports for the proxy to target.
+        self.sync_pins(Some(id));
         self.supervisor.connect(id, cli);
+        Ok(())
+    }
+
+    /// Runs pin proxies for every tunnel with pinned ports whose connection is active (plus `starting`).
+    pub fn sync_pins(&self, starting: Option<&str>) {
+        let wanted: Vec<(String, u16, u16)> = {
+            let s = self.settings.lock().unwrap();
+            s.tunnels
+                .iter()
+                .filter(|(id, _)| starting == Some(id.as_str()) || self.supervisor.is_active(id))
+                .flat_map(|(id, t)| t.pinned_ports.iter().map(move |(&r, &l)| (id.clone(), r, l)))
+                .collect()
+        };
+        self.pins.sync(&wanted);
+    }
+
+    /// Sets (local Some) or clears (None) the stable local port for one remote port.
+    pub fn set_pin(&self, id: &str, remote_port: u16, local_port: Option<u16>) -> Result<(), String> {
+        if remote_port == 0 || local_port == Some(0) {
+            return Err("Ports must be between 1 and 65535.".into());
+        }
+        {
+            let mut s = self.settings.lock().unwrap();
+            if let Some(l) = local_port
+                && let Some((other, _)) = s
+                    .tunnels
+                    .iter()
+                    .flat_map(|(tid, t)| t.pinned_ports.iter().map(move |(&r, &lp)| (tid, r, lp)))
+                    .find(|&(tid, r, lp)| lp == l && !(tid == id && r == remote_port))
+                    .map(|(tid, r, _)| (tid.clone(), r))
+            {
+                return Err(format!("localhost:{l} is already pinned for {other}."));
+            }
+            let t = s.tunnels.entry(id.to_string()).or_default();
+            match local_port {
+                Some(l) => t.pinned_ports.insert(remote_port, l),
+                None => t.pinned_ports.remove(&remote_port),
+            };
+        }
+        self.save_settings()?;
+        self.sync_pins(None);
+        self.publish();
         Ok(())
     }
 
@@ -425,54 +519,245 @@ impl AppState {
     pub fn stop_host(self: &Arc<Self>, id: &str) {
         self.hoster.disconnect(id);
         // The relay's host count lags; refresh so the card doesn't claim "hosted elsewhere".
+        self.refresh_later(3);
+    }
+
+    /// The service is eventually consistent; re-read after it settles.
+    pub fn refresh_later(self: &Arc<Self>, secs: u64) {
         let this = self.clone();
         tauri::async_runtime::spawn(async move {
-            tokio::time::sleep(Duration::from_secs(3)).await;
+            tokio::time::sleep(Duration::from_secs(secs)).await;
             this.refresh().await;
         });
     }
 
-    /// Creates a Tunnel Bar-labelled tunnel for localhost:port and starts hosting it.
-    pub async fn expose(self: &Arc<Self>, port: u16, protocol: &str, anonymous: bool, name: Option<&str>) -> Result<String, String> {
-        if port == 0 {
-            return Err("Enter a port between 1 and 65535.".into());
+    /// Waits until neither role runs a child for `id` (max ~4s).
+    async fn wait_stopped(&self, id: &str) {
+        for _ in 0..40 {
+            if !self.hoster.is_active(id) && !self.supervisor.is_active(id) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
         }
-        if !matches!(protocol, "http" | "https" | "auto") {
-            return Err(format!("Unsupported protocol {protocol}"));
+    }
+
+    /// `devtunnel host` publishes the ports that exist when it starts, so restart it after port changes.
+    async fn restart_host_if_running(&self, id: &str, cli: PathBuf) {
+        if !self.hoster.is_active(id) {
+            return;
         }
-        let name = name.map(str::trim).filter(|n| !n.is_empty());
-        if let Some(n) = name {
-            cli::validate_tunnel_id(n)?;
+        self.logs.push(id, "app", "Restarting host to publish the updated ports");
+        self.hoster.disconnect(id);
+        for _ in 0..40 {
+            if !self.hoster.is_active(id) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        self.hoster.connect(id, cli);
+    }
+
+    fn summary(&self, id: &str) -> Option<TunnelSummary> {
+        self.cache.lock().unwrap().summaries.iter().find(|s| s.tunnel_id == id).cloned()
+    }
+
+    fn created_by_app(&self, id: &str) -> bool {
+        self.summary(id).is_some_and(|s| s.labels.iter().any(|l| l == APP_LABEL))
+    }
+
+    /// Creates a tunnel (always labelled `tunnelbar`), adds ports/access, and optionally hosts it.
+    pub async fn create_tunnel(self: &Arc<Self>, req: CreateTunnelRequest) -> Result<String, String> {
+        if let Some(id) = req.tunnel_id.as_deref().filter(|i| !i.trim().is_empty()) {
+            cli::validate_tunnel_id(id.trim())?;
+        }
+        let mut labels: Vec<String> = vec![APP_LABEL.into()];
+        for l in req.labels.iter().map(|l| l.trim()).filter(|l| !l.is_empty()) {
+            validate_label(l)?;
+            if !labels.iter().any(|x| x.eq_ignore_ascii_case(l)) {
+                labels.push(l.to_string());
+            }
+        }
+        let expiration = req.expiration.as_deref().filter(|e| !e.trim().is_empty()).map(normalize_expiration).transpose()?;
+        let mut ports: Vec<(u16, &'static str)> = Vec::new();
+        for p in &req.ports {
+            if p.port == 0 {
+                return Err("Ports must be between 1 and 65535.".into());
+            }
+            if ports.iter().any(|(n, _)| *n == p.port) {
+                return Err(format!("Port {} is listed twice.", p.port));
+            }
+            ports.push((p.port, validate_protocol(&p.protocol)?));
+        }
+        if req.host && ports.is_empty() {
+            return Err("Add at least one port to host this tunnel.".into());
         }
         let cli = self.cli_path().await.ok_or("devtunnel CLI not found")?;
-        let id = cli::create(&cli, name, &[APP_LABEL], &format!("localhost:{port} exposed by Tunnel Bar")).await?;
-        self.logs.push(&id, "app", &format!("Created tunnel for localhost:{port} ({protocol})"));
+        let label_refs: Vec<&str> = labels.iter().map(String::as_str).collect();
+        let id = cli::create(
+            &cli,
+            req.tunnel_id.as_deref().map(str::trim).filter(|i| !i.is_empty()),
+            &label_refs,
+            req.description.trim(),
+            expiration.as_deref(),
+        )
+        .await?;
+        self.logs.push(&id, "app", &format!("Created tunnel ({} port(s))", ports.len()));
         let setup = async {
-            cli::port_create(&cli, &id, port, protocol).await?;
-            if anonymous {
+            for (port, protocol) in &ports {
+                cli::port_create(&cli, &id, *port, protocol).await?;
+            }
+            if req.anonymous {
                 cli::set_anonymous(&cli, &id, true).await?;
             }
             Ok::<(), String>(())
         };
         if let Err(e) = setup.await {
+            // We just created it, so rolling back can't touch anything else.
             let _ = cli::delete(&cli, &id).await;
             return Err(e);
         }
-        {
-            let mut s = self.settings.lock().unwrap();
-            let t = s.tunnels.entry(id.clone()).or_default();
-            t.nickname = Some(format!("localhost:{port}"));
+        if let Some(n) = req.nickname.as_deref().map(str::trim).filter(|n| !n.is_empty()) {
+            self.settings.lock().unwrap().tunnels.entry(id.clone()).or_default().nickname = Some(n.to_string());
+            self.save_settings()?;
         }
-        self.save_settings()?;
         self.refresh().await;
-        self.hoster.connect(&id, cli);
+        if req.host {
+            self.hoster.connect(&id, cli);
+        }
         // The service can lag on new tunnels/access rules; re-read once it settles.
-        let this = self.clone();
-        tauri::async_runtime::spawn(async move {
-            tokio::time::sleep(Duration::from_secs(4)).await;
-            this.refresh().await;
-        });
+        self.refresh_later(4);
         Ok(id)
+    }
+
+    /// Edits description, labels and/or expiration.
+    pub async fn update_tunnel(self: &Arc<Self>, id: &str, mut req: UpdateTunnelRequest) -> Result<(), String> {
+        for l in req.add_labels.iter_mut().chain(req.remove_labels.iter_mut()) {
+            *l = l.trim().to_string();
+            validate_label(l)?;
+        }
+        if let Some(d) = req.description.as_mut() {
+            *d = d.trim().to_string();
+        }
+        req.expiration = req.expiration.as_deref().filter(|e| !e.trim().is_empty()).map(normalize_expiration).transpose()?;
+        let cli = self.cli_path().await.ok_or("devtunnel CLI not found")?;
+        cli::update(&cli, id, &req).await?;
+        self.logs.push(id, "app", "Tunnel properties updated");
+        {
+            let mut c = self.cache.lock().unwrap();
+            let apply = |labels: &mut Vec<String>, description: &mut String, expiration: &mut String| {
+                labels.retain(|l| !req.remove_labels.iter().any(|r| r.eq_ignore_ascii_case(l)));
+                for a in &req.add_labels {
+                    if !labels.iter().any(|l| l.eq_ignore_ascii_case(a)) {
+                        labels.push(a.clone());
+                    }
+                }
+                if let Some(d) = &req.description {
+                    *description = d.clone();
+                }
+                if let Some(h) = req.expiration.as_deref().and_then(parse_expiration_hours) {
+                    *expiration = if h % 24 == 0 { format!("{} days", h / 24) } else { format!("{h} hours") };
+                }
+            };
+            if let Some(s) = c.summaries.iter_mut().find(|s| s.tunnel_id == id) {
+                apply(&mut s.labels, &mut s.description, &mut s.tunnel_expiration);
+            }
+            if let Some(d) = c.details.get_mut(id) {
+                apply(&mut d.labels, &mut d.description, &mut d.tunnel_expiration);
+            }
+        }
+        self.publish();
+        self.refresh_later(4);
+        Ok(())
+    }
+
+    /// Ports on a tunnel another machine hosts belong to that machine's setup; require an explicit override.
+    fn check_port_change(&self, id: &str, allow_hosted_elsewhere: bool) -> Result<(), String> {
+        if self.hosted_elsewhere(id) && !allow_hosted_elsewhere {
+            return Err(format!(
+                "{HOSTED_ELSEWHERE}This tunnel is hosted by another machine; changing its ports affects that machine's host."
+            ));
+        }
+        Ok(())
+    }
+
+    pub async fn add_port(self: &Arc<Self>, id: &str, port: u16, protocol: &str, allow_hosted_elsewhere: bool) -> Result<(), String> {
+        if port == 0 {
+            return Err("Enter a port between 1 and 65535.".into());
+        }
+        let protocol = validate_protocol(protocol)?;
+        self.check_port_change(id, allow_hosted_elsewhere)?;
+        let cli = self.cli_path().await.ok_or("devtunnel CLI not found")?;
+        cli::port_create(&cli, id, port, protocol).await?;
+        self.logs.push(id, "app", &format!("Added port {port} ({protocol})"));
+        {
+            let mut c = self.cache.lock().unwrap();
+            if let Some(d) = c.details.get_mut(id).filter(|d| !d.ports.iter().any(|p| p.port_number == port)) {
+                d.ports.push(TunnelPort { port_number: port, protocol: protocol.into(), port_uri: String::new() });
+                d.ports.sort_by_key(|p| p.port_number);
+            }
+            if let Some(s) = c.summaries.iter_mut().find(|s| s.tunnel_id == id) {
+                s.port_count += 1;
+            }
+        }
+        self.publish();
+        self.restart_host_if_running(id, cli).await;
+        self.refresh_later(4);
+        Ok(())
+    }
+
+    /// Removes a port. Needs `confirm` unless Tunnel Bar created the tunnel.
+    pub async fn remove_port(
+        self: &Arc<Self>,
+        id: &str,
+        port: u16,
+        confirm: bool,
+        allow_hosted_elsewhere: bool,
+    ) -> Result<(), String> {
+        self.check_port_change(id, allow_hosted_elsewhere)?;
+        if !confirm && !self.created_by_app(id) {
+            return Err(format!("{CONFIRM_REQUIRED}This tunnel wasn't created by Tunnel Bar. Confirm to remove port {port}."));
+        }
+        let cli = self.cli_path().await.ok_or("devtunnel CLI not found")?;
+        cli::port_delete(&cli, id, port).await?;
+        self.logs.push(id, "app", &format!("Removed port {port}"));
+        let pinned = {
+            let mut c = self.cache.lock().unwrap();
+            if let Some(d) = c.details.get_mut(id) {
+                d.ports.retain(|p| p.port_number != port);
+            }
+            if let Some(s) = c.summaries.iter_mut().find(|s| s.tunnel_id == id) {
+                s.port_count = s.port_count.saturating_sub(1);
+            }
+            self.settings.lock().unwrap().tunnels.get_mut(id).and_then(|t| t.pinned_ports.remove(&port)).is_some()
+        };
+        if pinned {
+            self.save_settings()?;
+            self.sync_pins(None);
+        }
+        self.publish();
+        self.restart_host_if_running(id, cli).await;
+        self.refresh_later(4);
+        Ok(())
+    }
+
+    /// Creates a Tunnel Bar-labelled tunnel for localhost:port and starts hosting it.
+    pub async fn expose(self: &Arc<Self>, port: u16, protocol: &str, anonymous: bool, name: Option<&str>) -> Result<String, String> {
+        if !matches!(protocol, "http" | "https" | "auto") {
+            return Err(format!("Unsupported protocol {protocol}"));
+        }
+        if port == 0 {
+            return Err("Enter a port between 1 and 65535.".into());
+        }
+        self.create_tunnel(CreateTunnelRequest {
+            tunnel_id: name.map(str::to_string),
+            description: format!("localhost:{port} exposed by Tunnel Bar"),
+            ports: vec![PortSpec { port, protocol: protocol.into() }],
+            anonymous,
+            host: true,
+            nickname: name.is_none().then(|| format!("localhost:{port}")),
+            ..Default::default()
+        })
+        .await
     }
 
     pub async fn set_anonymous(self: &Arc<Self>, id: &str, allow: bool) -> Result<(), String> {
@@ -495,38 +780,34 @@ impl AppState {
             }
         }
         self.publish();
-        let this = self.clone();
-        tauri::async_runtime::spawn(async move {
-            tokio::time::sleep(Duration::from_secs(4)).await;
-            this.refresh().await;
-        });
+        self.refresh_later(4);
         Ok(())
     }
 
-    /// Deletes a tunnel Tunnel Bar created (refuses others to avoid destroying dev box tunnels).
-    pub async fn delete_tunnel(self: &Arc<Self>, id: &str) -> Result<(), String> {
-        let ours = self
-            .cache
-            .lock()
-            .unwrap()
-            .summaries
-            .iter()
-            .any(|s| s.tunnel_id == id && s.labels.iter().any(|l| l == APP_LABEL));
-        if !ours {
-            return Err("Only tunnels created by Tunnel Bar can be deleted here.".into());
-        }
+    pub fn delete_preflight(&self, id: &str) -> Result<DeletePreflight, String> {
+        let summary = self.summary(id).ok_or("Tunnel not found on this account. Refresh and try again.")?;
+        let created_by_app = summary.labels.iter().any(|l| l == APP_LABEL);
+        Ok(DeletePreflight {
+            created_by_app,
+            needs_confirm: !created_by_app,
+            hosted_elsewhere: self.hosted_elsewhere(id),
+            hosting_here: self.hoster.is_active(id),
+            connected_here: self.supervisor.is_active(id),
+        })
+    }
+
+    /// Deletes a tunnel. Tunnels Tunnel Bar didn't create need `confirm`; tunnels hosted by another
+    /// machine (e.g. a dev box) also need `allow_hosted_elsewhere`.
+    pub async fn delete_tunnel(self: &Arc<Self>, id: &str, confirm: bool, allow_hosted_elsewhere: bool) -> Result<(), String> {
+        check_delete(&self.delete_preflight(id)?, confirm, allow_hosted_elsewhere)?;
         let cli = self.cli_path().await.ok_or("devtunnel CLI not found")?;
         self.hoster.disconnect(id);
         self.supervisor.disconnect(id);
-        for _ in 0..40 {
-            if !self.hoster.is_active(id) && !self.supervisor.is_active(id) {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(100)).await;
-        }
+        self.wait_stopped(id).await;
         cli::delete(&cli, id).await?;
         self.settings.lock().unwrap().tunnels.remove(id);
         self.save_settings()?;
+        self.sync_pins(None);
         self.logs.push(id, "app", "Tunnel deleted");
         {
             let mut c = self.cache.lock().unwrap();
@@ -539,12 +820,84 @@ impl AppState {
         Ok(())
     }
 
+    /// Starts `devtunnel user login` in the background; progress is published as `Snapshot.login`.
+    pub async fn start_login(self: &Arc<Self>, provider: LoginProvider, device_code: bool) -> Result<(), String> {
+        let cli = self.cli_path().await.ok_or("devtunnel CLI not found")?;
+        let cancel = Arc::new(tokio::sync::Notify::new());
+        {
+            let mut cur = self.login_cancel.lock().unwrap();
+            if cur.is_some() {
+                return Err("A sign-in is already in progress.".into());
+            }
+            *cur = Some(cancel.clone());
+        }
+        let this = self.clone();
+        tauri::async_runtime::spawn(async move {
+            let (a, b) = (this.clone(), this.clone());
+            let fin = login::run(
+                &cli,
+                provider,
+                device_code,
+                cancel,
+                login::LOGIN_TIMEOUT,
+                move |st| {
+                    *a.login.lock().unwrap() = Some(st.clone());
+                    a.publish();
+                },
+                move |line| {
+                    b.logs.push("_app", "login", line);
+                },
+            )
+            .await;
+            *this.login_cancel.lock().unwrap() = None;
+            if matches!(fin, LoginState::Succeeded { .. }) {
+                this.refresh().await;
+                this.auto_connect().await;
+            }
+        });
+        Ok(())
+    }
+
+    pub fn cancel_login(&self) {
+        if let Some(c) = self.login_cancel.lock().unwrap().as_ref() {
+            c.notify_one();
+        }
+    }
+
+    /// Signs the CLI out. Running connections/hosts are left alone (they keep their relay sessions).
+    pub async fn logout(self: &Arc<Self>) -> Result<(), String> {
+        let cli = self.cli_path().await.ok_or("devtunnel CLI not found")?;
+        cli::logout(&cli).await?;
+        self.logs.push("_app", "app", "Signed out of devtunnel");
+        {
+            let mut c = self.cache.lock().unwrap();
+            c.auth = Some(AuthStatus { logged_in: false, message: "Not logged in.".into() });
+            c.summaries.clear();
+            c.details.clear();
+        }
+        *self.login.lock().unwrap() = None;
+        self.publish();
+        self.refresh().await;
+        Ok(())
+    }
+
+    pub fn set_label_filter(&self, labels: Vec<String>) -> Result<(), String> {
+        let mut clean: Vec<String> = labels.into_iter().map(|l| l.trim().to_string()).filter(|l| !l.is_empty()).collect();
+        clean.dedup_by(|a, b| a.eq_ignore_ascii_case(b));
+        self.settings.lock().unwrap().label_filter = clean;
+        self.save_settings()?;
+        self.publish();
+        Ok(())
+    }
+
     pub fn shutdown(&self) {
         // Stop both roles concurrently so quitting stays within one grace period.
         let h = self.hoster.clone();
         let t = std::thread::spawn(move || h.shutdown());
         self.supervisor.shutdown();
         let _ = t.join();
+        self.pins.stop_all();
+        self.cancel_login();
     }
 
     /// Stops an external `devtunnel connect` (signals only that PID, not its terminal's process group).
@@ -703,4 +1056,28 @@ fn port_listening(port: u16) -> bool {
             .parse::<std::net::SocketAddr>()
             .is_ok_and(|a| std::net::TcpStream::connect_timeout(&a, timeout).is_ok())
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn pf(created_by_app: bool, hosted_elsewhere: bool) -> DeletePreflight {
+        DeletePreflight { created_by_app, needs_confirm: !created_by_app, hosted_elsewhere, hosting_here: false, connected_here: false }
+    }
+
+    #[test]
+    fn delete_guards() {
+        assert!(check_delete(&pf(true, false), false, false).is_ok());
+        let e = check_delete(&pf(false, false), false, false).unwrap_err();
+        assert!(e.starts_with(CONFIRM_REQUIRED), "{e}");
+        assert!(check_delete(&pf(false, false), true, false).is_ok());
+        // Hosted elsewhere (e.g. the dev box SSH tunnel): confirm alone is not enough.
+        let e = check_delete(&pf(false, true), true, false).unwrap_err();
+        assert!(e.starts_with(HOSTED_ELSEWHERE), "{e}");
+        let e = check_delete(&pf(true, true), false, false).unwrap_err();
+        assert!(e.starts_with(HOSTED_ELSEWHERE), "{e}");
+        assert!(check_delete(&pf(false, true), false, true).unwrap_err().starts_with(CONFIRM_REQUIRED));
+        assert!(check_delete(&pf(false, true), true, true).is_ok());
+    }
 }

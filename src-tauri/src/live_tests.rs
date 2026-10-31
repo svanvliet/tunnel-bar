@@ -1,0 +1,153 @@
+//! Live Phase 3 tests against the real CLI and signed-in account:
+//! `cargo test live_manage -- --ignored --nocapture`.
+//!
+//! Only touches a temporary `tunnelbar-test-*` tunnel created here with a 1h expiration, and
+//! always deletes it (also on panic), then checks `devtunnel list -j` no longer shows it.
+
+use crate::cli;
+use crate::logs::LogStore;
+use crate::model::{ConnState, Role, UpdateTunnelRequest};
+use crate::pin::Pins;
+use crate::supervisor::Supervisor;
+use std::io::{Read, Write};
+use std::net::TcpListener;
+use std::path::PathBuf;
+use std::sync::Arc;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+const PREFIX: &str = "tunnelbar-test-";
+
+struct TempTunnel {
+    cli: PathBuf,
+    id: String,
+}
+
+impl Drop for TempTunnel {
+    fn drop(&mut self) {
+        assert!(self.id.starts_with(PREFIX), "refusing to delete {}", self.id);
+        let out = std::process::Command::new(&self.cli).args(["delete", &self.id, "-f"]).output();
+        eprintln!("cleanup delete {}: {:?}", self.id, out.map(|o| o.status));
+        let list = std::process::Command::new(&self.cli).args(["list", "-j"]).output().expect("devtunnel list -j");
+        let tunnels = cli::parse_list(&String::from_utf8_lossy(&list.stdout)).expect("parse list");
+        let ids: Vec<_> = tunnels.iter().map(|t| t.tunnel_id.as_str()).collect();
+        eprintln!("devtunnel list -j after cleanup: {ids:?}");
+        assert!(!ids.iter().any(|t| t.starts_with(PREFIX)), "test tunnel left behind: {ids:?}");
+    }
+}
+
+fn free_port() -> u16 {
+    TcpListener::bind(("127.0.0.1", 0)).unwrap().local_addr().unwrap().port()
+}
+
+fn http_server(body: &'static str) -> u16 {
+    let l = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+    let port = l.local_addr().unwrap().port();
+    std::thread::spawn(move || {
+        for mut c in l.incoming().flatten() {
+            let mut buf = [0u8; 1024];
+            let _ = c.read(&mut buf);
+            let _ = write!(c, "HTTP/1.0 200 OK\r\nContent-Length: {}\r\n\r\n{body}", body.len());
+        }
+    });
+    port
+}
+
+fn get(port: u16) -> String {
+    let mut c = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
+    c.set_read_timeout(Some(Duration::from_secs(20))).unwrap();
+    c.write_all(b"GET / HTTP/1.0\r\nHost: localhost\r\n\r\n").unwrap();
+    let mut s = String::new();
+    let _ = c.read_to_string(&mut s);
+    s
+}
+
+fn wait(mut f: impl FnMut() -> bool) -> bool {
+    for _ in 0..600 {
+        if f() {
+            return true;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    false
+}
+
+#[test]
+#[ignore]
+fn live_manage_lifecycle_and_pin() {
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let cli = rt.block_on(cli::find_cli(None)).expect("devtunnel CLI");
+    let nonce = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis() % 1_000_000_000;
+    let name = format!("{PREFIX}{nonce}");
+
+    // Create with labels, description and the 1h expiration.
+    let id = rt.block_on(cli::create(&cli, Some(&name), &["tunnelbar", "tbtest"], "phase3 live", Some("1h"))).unwrap();
+    let _guard = TempTunnel { cli: cli.clone(), id: id.clone() };
+    assert!(id.starts_with(&name), "{id}");
+    let d = rt.block_on(cli::show(&cli, &id)).unwrap();
+    assert_eq!(crate::model::parse_expiration_hours(&d.tunnel_expiration), Some(1), "{}", d.tunnel_expiration);
+    assert!(d.labels.contains(&"tbtest".to_string()));
+
+    // Edit labels, description and expiration.
+    let req = UpdateTunnelRequest {
+        description: Some("edited".into()),
+        add_labels: vec!["alpha".into(), "beta".into()],
+        remove_labels: vec!["tbtest".into()],
+        expiration: Some("2h".into()),
+    };
+    rt.block_on(cli::update(&cli, &id, &req)).unwrap();
+    let ok = wait(|| {
+        let d = rt.block_on(cli::show(&cli, &id)).unwrap();
+        d.description == "edited"
+            && d.labels.contains(&"alpha".into())
+            && d.labels.contains(&"beta".into())
+            && !d.labels.contains(&"tbtest".into())
+            && crate::model::parse_expiration_hours(&d.tunnel_expiration) == Some(2)
+    });
+    assert!(ok, "update visible: {:?}", rt.block_on(cli::show(&cli, &id)));
+
+    // Add two ports, remove one.
+    let served = http_server("tunnelbar-pin-ok");
+    let extra = free_port();
+    rt.block_on(cli::port_create(&cli, &id, served, "http")).unwrap();
+    rt.block_on(cli::port_create(&cli, &id, extra, "auto")).unwrap();
+    rt.block_on(cli::port_delete(&cli, &id, extra)).unwrap();
+    assert!(wait(|| {
+        let ports: Vec<u16> = rt.block_on(cli::show(&cli, &id)).unwrap().ports.iter().map(|p| p.port_number).collect();
+        ports == vec![served]
+    }));
+
+    // Host it, then connect through a pinned local port.
+    let dir = tempfile::tempdir().unwrap();
+    let logs = Arc::new(LogStore::new(dir.path().join("logs")));
+    let host = Supervisor::with_role(Role::Host, logs.clone(), Arc::new(|_| {}));
+    host.connect(&id, cli.clone());
+    assert!(wait(|| host.state(&id).0 == ConnState::Connected && !host.state(&id).1.is_empty()), "hosted");
+    std::thread::sleep(Duration::from_secs(2));
+
+    let client = Arc::new(Supervisor::new(logs, Arc::new(|_| {})));
+    let c2 = client.clone();
+    let pins = Pins::new(Arc::new(move |tid: &str, remote: u16| {
+        c2.state(tid).1.iter().find(|f| f.remote_port == remote).map(|f| f.local_port)
+    }));
+    let pinned = free_port();
+    pins.sync(&[(id.clone(), served, pinned)]);
+    assert!(wait(|| pins.view(&id, served, pinned).listening), "pin listening");
+    client.connect(&id, cli.clone());
+    assert!(wait(|| !client.state(&id).1.is_empty()), "client forwarding");
+    let chosen = client.state(&id).1[0].local_port;
+    eprintln!("served={served} pinned={pinned} connect chose={chosen}");
+    assert_ne!(chosen, pinned);
+    let body = get(pinned);
+    eprintln!("response head={:?}", body.lines().next());
+    assert!(body.contains("tunnelbar-pin-ok"), "HTTP through the pin: {body:?}");
+
+    let pids = [host.managed_pids(), client.managed_pids()].concat();
+    pins.stop_all();
+    client.disconnect(&id);
+    host.disconnect(&id);
+    assert!(wait(|| host.state(&id).0 == ConnState::Disconnected));
+    std::thread::sleep(Duration::from_millis(500));
+    assert!(pids.iter().all(|&p| !crate::supervisor::alive(p)));
+
+    rt.block_on(cli::delete(&cli, &id)).unwrap();
+}
