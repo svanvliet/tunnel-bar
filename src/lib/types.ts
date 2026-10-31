@@ -55,6 +55,8 @@ export interface TunnelView {
   id: string; displayName: string; summary: TunnelSummary; ports: TunnelPort[];
   state: ConnState; forwards: Forward[]; settings: TunnelSettings; orphaned: boolean;
   hostState: ConnState; hostedPorts: HostedPort[]; anonymous: boolean; createdByApp: boolean; hostedElsewhere: boolean;
+  /** "live": this device hosts it now (Tunnel Bar or an external host); "last": it hosted it last. */
+  hostedHere?: "no" | "live" | "last";
   /** Tunnel lifetime in hours (e.g. 720 for "30 days"); null if unknown. */
   expirationHours?: number | null;
   /** False when `settings.labelFilter` is set and this tunnel has none of those labels. */

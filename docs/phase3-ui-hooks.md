@@ -134,6 +134,7 @@ By default the service rewrites `Host` to `localhost` and `Origin` to `http(s):/
 - `accessRules: AccessEntry[]`: tunnel-level access rules. See Access rules above.
 - `portMaps: PortMapView[]`: `{remotePort, localPort, listening, error}` per hosting port map. `listening` is the proxy; it is only true while this Mac hosts.
 - `hostedPorts[].localPort`: the server a hosted port reaches. `listening` now refers to that port, so "nothing listening" warnings name `localhost:<localPort>`.
+- `hostedHere: "no" | "live" | "last"`: `live` means this device hosts the tunnel now, via Tunnel Bar or an external `devtunnel host` (including an elevated one on Windows). `last` means this device hosted it last and no other device has been seen hosting it since; it's remembered in settings (`hostedHere`) across restarts. The Remote card shows "This device" and no Connect for `live`, and a non-primary Connect for `last`.
 - `pins: PinView[]`: each entry is `{remotePort, localPort, listening, targetPort, error}`.
   - `targetPort` is the port that `devtunnel connect` actually chose. It is null while the tunnel is disconnected.
   - `error` is set when the pinned port is busy. The proxy retries every 3 seconds.
