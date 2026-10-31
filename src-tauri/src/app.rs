@@ -10,7 +10,7 @@ use crate::{cli, login, settings};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter, Manager};
 use tauri_plugin_notification::NotificationExt;
 
@@ -54,6 +54,9 @@ pub struct AppState {
     pub hotkey_error: Mutex<Option<String>>,
     /// A devtunnel process we can't inspect (elevated) couldn't be matched to a tunnel.
     pub admin_devtunnel: Mutex<bool>,
+    /// When a host on this device was last seen per tunnel (feeds `Settings.hosted_here`).
+    local_host_seen: Mutex<HashMap<String, Instant>>,
+    started: Instant,
 }
 
 /// Why a delete must be refused, given what the caller acknowledged.
@@ -126,6 +129,8 @@ impl AppState {
                 login_pid: Default::default(),
                 hotkey_error: Mutex::new(None),
                 admin_devtunnel: Mutex::new(false),
+                local_host_seen: Mutex::new(HashMap::new()),
+                started: Instant::now(),
                 supervisor,
                 hoster: Supervisor::with_role(Role::Host, logs.clone(), listener)
                     .with_pidfile(settings::hosts_pidfile_path()),
@@ -195,6 +200,13 @@ impl AppState {
                 let hosted_elsewhere = !hosting_here
                     && !matches!(host_state, ConnState::External { .. })
                     && summary.as_ref().is_some_and(|s| s.host_connections > 0);
+                let hosted_here = if hosting_here || matches!(host_state, ConnState::External { .. }) {
+                    HostedHere::Live
+                } else if settings.hosted_here.contains(id) {
+                    HostedHere::Last
+                } else {
+                    HostedHere::No
+                };
                 let tunnel_settings = settings.tunnels.get(id).cloned().unwrap_or_default();
                 let expiration = details
                     .map(|d| d.tunnel_expiration.as_str())
@@ -216,6 +228,7 @@ impl AppState {
                         .collect(),
                     access_rules: details.map(|d| d.access_control.clone()).unwrap_or_default(),
                     host_state,
+                    hosted_here,
                     hosted_ports,
                     hosted_elsewhere,
                     anonymous: details.is_some_and(|d| d.access_control.iter().any(|a| a.allows_anonymous())),
@@ -457,6 +470,7 @@ impl AppState {
         let notice_changed = std::mem::replace(&mut *self.admin_devtunnel.lock().unwrap(), unexplained) != unexplained;
         let with_ports: Vec<(ExternalConn, Vec<u16>)> =
             found.into_iter().map(|e| { let p = external::listen_ports(e.pid); (e, p) }).collect();
+        let remembered_changed = self.remember_hosted_here(&with_ports, unexplained);
         let listening = self.probe_hosted_ports();
         let listening_changed = {
             let mut c = self.cache.lock().unwrap();
@@ -467,8 +481,43 @@ impl AppState {
             *cur = with_ports;
             true
         } else {
-            listening_changed || notice_changed
+            listening_changed || notice_changed || remembered_changed
         }
+    }
+
+    /// Updates `Settings.hosted_here` from what's hosting on this device right now.
+    fn remember_hosted_here(&self, externals: &[(ExternalConn, Vec<u16>)], admin_notice: bool) -> bool {
+        let now = Instant::now();
+        let summaries = self.cache.lock().unwrap().summaries.clone();
+        let changed = {
+            let mut seen = self.local_host_seen.lock().unwrap();
+            let mut settings = self.settings.lock().unwrap();
+            let mut changed = false;
+            for s in &summaries {
+                let id = &s.tunnel_id;
+                let live = self.hoster.is_active(id)
+                    || externals.iter().any(|(e, _)| e.role == Role::Host && external::matches_tunnel(&e.tunnel_arg, id));
+                if live {
+                    seen.insert(id.clone(), now);
+                }
+                let since = now.duration_since(seen.get(id).copied().unwrap_or(self.started));
+                let remembered = settings.hosted_here.contains(id);
+                let next = next_hosted_here(remembered, live, s.host_connections > 0, admin_notice, since);
+                if next != remembered {
+                    changed = true;
+                    if next {
+                        settings.hosted_here.insert(id.clone());
+                    } else {
+                        settings.hosted_here.remove(id);
+                    }
+                }
+            }
+            changed
+        };
+        if changed && let Err(e) = self.save_settings() {
+            self.logs.push("_app", "app", &format!("Couldn't save settings: {e}"));
+        }
+        changed
     }
 
     /// Checks which hosted ports have a local server, so the UI can warn about "nothing listening".
@@ -1454,9 +1503,42 @@ fn port_listening(port: u16) -> bool {
     })
 }
 
+/// How long another device must be seen hosting, with no host here, before we forget hosting it.
+/// Covers the service still reporting our own just-stopped host.
+const HOSTED_HERE_GRACE: Duration = Duration::from_secs(60);
+
+/// Whether to remember this device as the tunnel's host. `since_local` is the time since a host was
+/// last seen here (or since launch). An unattributed admin `devtunnel` may be that host, so keep it.
+fn next_hosted_here(remembered: bool, live: bool, host_online: bool, admin_notice: bool, since_local: Duration) -> bool {
+    if live {
+        return true;
+    }
+    if remembered && host_online && !admin_notice && since_local >= HOSTED_HERE_GRACE {
+        return false;
+    }
+    remembered
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn remembers_hosting_here_until_another_device_hosts() {
+        let (s0, long) = (Duration::ZERO, HOSTED_HERE_GRACE);
+        // Hosting here (by Tunnel Bar or an external host): remember.
+        assert!(next_hosted_here(false, true, true, false, s0));
+        // Host went down: keep it, so the card can say this device hosted it last.
+        assert!(next_hosted_here(true, false, false, false, long));
+        // Service still lists the host we just stopped: keep within the grace period.
+        assert!(next_hosted_here(true, false, true, false, Duration::from_secs(5)));
+        // Another device has been hosting past the grace period: forget.
+        assert!(!next_hosted_here(true, false, true, false, long));
+        // An unattributed admin devtunnel may be our host: keep.
+        assert!(next_hosted_here(true, false, true, true, long));
+        // Never-hosted tunnels stay unremembered.
+        assert!(!next_hosted_here(false, false, true, false, long));
+    }
 
     fn pf(created_by_app: bool, hosted_elsewhere: bool) -> DeletePreflight {
         DeletePreflight { created_by_app, needs_confirm: !created_by_app, hosted_elsewhere, hosting_here: false, connected_here: false }

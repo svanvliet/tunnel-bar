@@ -108,7 +108,7 @@
       <div class="tunnel-state {stateTone}" title={"message" in connectionState ? connectionState.message : displayState}>
         <span class="state-dot"></span><span>{displayState}</span>
         {#if connectionState.kind === "connected" || connectionState.kind === "disconnected"}
-          <span class="host-availability">· {local && managedHost ? "This device" : t.summary.hostConnections > 0 ? "Host online" : "Host offline"}</span>
+          <span class="host-availability">· {(local && managedHost) || t.hostedHere === "live" ? "This device" : t.summary.hostConnections > 0 ? "Host online" : t.hostedHere === "last" ? "Host offline · last hosted here" : "Host offline"}</span>
         {/if}
       </div>
     </div>
@@ -227,8 +227,11 @@
           <button class="primary" disabled={busy || t.state.kind !== "connected"} onclick={() => onOpenSsh(t, sshForwards[0])}><Icon name="terminal" size={14} />Open SSH</button>
         {/if}
         <button class="quiet" disabled={busy} onclick={() => onAction(t, "disconnect")}>Disconnect</button>
+      {:else if t.hostedHere === "live"}
+        <!-- Connecting to this device's own host only loops back to it. -->
+        <span class="hint">Hosted on this device</span>
       {:else}
-        <button class="primary" disabled={busy || !ready} onclick={() => onAction(t, "connect")}>Connect</button>
+        <button class:primary={t.hostedHere !== "last"} disabled={busy || !ready} title={t.hostedHere === "last" ? "This device hosted this tunnel last" : undefined} onclick={() => onAction(t, "connect")}>Connect</button>
       {/if}
       <span class="spacer"></span>
       <label class="auto-toggle" title="Connect automatically when Tunnel Bar starts">

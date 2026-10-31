@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 /// Tunnel summary as returned by `devtunnel list -j`.
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
@@ -181,6 +181,9 @@ pub struct Settings {
     pub hotkey: Option<String>,
     /// Show only tunnels carrying any of these labels (empty = all).
     pub label_filter: Vec<String>,
+    /// Tunnels this device hosted most recently (by Tunnel Bar or an external `devtunnel host`).
+    /// Kept while the host is down; dropped once another device is seen hosting.
+    pub hosted_here: BTreeSet<String>,
 }
 
 pub const DEFAULT_HOTKEY: &str = "CmdOrCtrl+Alt+Shift+T";
@@ -195,6 +198,7 @@ impl Default for Settings {
             tunnels: BTreeMap::new(),
             hotkey: Some(DEFAULT_HOTKEY.into()),
             label_filter: Vec::new(),
+            hosted_here: BTreeSet::new(),
         }
     }
 }
@@ -236,6 +240,19 @@ pub struct TunnelView {
     pub access_rules: Vec<AccessEntry>,
     /// Hosting port maps (tunnel port != local port).
     pub port_maps: Vec<PortMapView>,
+    /// Whether this device hosts the tunnel now, or was the last device seen hosting it.
+    pub hosted_here: HostedHere,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum HostedHere {
+    #[default]
+    No,
+    /// Tunnel Bar or an external `devtunnel host` on this device is hosting it.
+    Live,
+    /// Not hosted here right now, but this device hosted it last.
+    Last,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
