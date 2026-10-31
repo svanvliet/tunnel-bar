@@ -4,7 +4,7 @@ use crate::cli;
 use crate::model::{LoginProvider, LoginState};
 use std::path::Path;
 use std::process::Stdio;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
@@ -14,11 +14,13 @@ pub const LOGIN_TIMEOUT: Duration = Duration::from_secs(15 * 60);
 
 /// Runs the login to completion, calling `on_state` for each transition, and returns the final state.
 /// `cancel` stops the CLI (the account is left unchanged).
+#[allow(clippy::too_many_arguments)]
 pub async fn run(
     cli: &Path,
     provider: LoginProvider,
     device_code: bool,
     cancel: Arc<Notify>,
+    pid_slot: Arc<Mutex<Option<u32>>>,
     timeout: Duration,
     on_state: impl Fn(&LoginState),
     on_line: impl Fn(&str),
@@ -38,6 +40,15 @@ pub async fn run(
         Ok(c) => c,
         Err(e) => return finish(&on_state, LoginState::Failed { message: format!("failed to start devtunnel: {e}") }),
     };
+    *pid_slot.lock().unwrap() = child.id();
+    // Clears the slot however this future ends (including being dropped).
+    struct ClearPid(Arc<Mutex<Option<u32>>>);
+    impl Drop for ClearPid {
+        fn drop(&mut self) {
+            *self.0.lock().unwrap() = None;
+        }
+    }
+    let _clear = ClearPid(pid_slot);
     let mut out = BufReader::new(child.stdout.take().unwrap()).lines();
     let mut err = BufReader::new(child.stderr.take().unwrap()).lines();
     let (mut out_done, mut err_done) = (false, false);
@@ -89,6 +100,20 @@ pub async fn run(
     finish(&on_state, outcome(status.is_some_and(|s| s.success()), &lines))
 }
 
+/// Synchronously stops a running login CLI (its whole process group); used on quit, when the async
+/// cancel path never gets to run.
+pub fn stop(pid_slot: &Mutex<Option<u32>>) {
+    let Some(pid) = pid_slot.lock().unwrap().take() else { return };
+    crate::supervisor::signal_group(pid, false);
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    while std::time::Instant::now() < deadline && crate::supervisor::alive(pid) {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    if crate::supervisor::alive(pid) {
+        crate::supervisor::signal_group(pid, true);
+    }
+}
+
 fn finish(on_state: &impl Fn(&LoginState), s: LoginState) -> LoginState {
     on_state(&s);
     s
@@ -113,7 +138,6 @@ pub fn outcome(success: bool, lines: &[String]) -> LoginState {
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
 
     fn fake_cli(dir: &Path, body: &str) -> std::path::PathBuf {
         use std::os::unix::fs::PermissionsExt;
@@ -138,7 +162,7 @@ mod tests {
                     c2.notify_one();
                 });
             }
-            run(&cli, LoginProvider::Microsoft, device, cancel, Duration::from_secs(20), move |s| s2.lock().unwrap().push(s.clone()), |_| {}).await
+            run(&cli, LoginProvider::Microsoft, device, cancel, Default::default(), Duration::from_secs(20), move |s| s2.lock().unwrap().push(s.clone()), |_| {}).await
         });
         let seen = seen.lock().unwrap().clone();
         (fin, seen)
@@ -164,6 +188,38 @@ mod tests {
     fn failure_reports_last_error_line() {
         let (fin, _) = run_fake("echo 'Starting login' \necho 'Error: AADSTS70016 authorization_pending expired' >&2\nexit 1", false, None);
         assert_eq!(fin, LoginState::Failed { message: "Error: AADSTS70016 authorization_pending expired".into() });
+    }
+
+    #[test]
+    fn stop_kills_login_group_synchronously() {
+        // Mimics quitting: the async task never runs again, only `stop` (called from `shutdown`).
+        let dir = tempfile::tempdir().unwrap();
+        let grandchild = dir.path().join("gc.pid");
+        let cli = fake_cli(dir.path(), &format!("sleep 30 &\necho $! > '{}'\nwait", grandchild.display()));
+        let slot: Arc<Mutex<Option<u32>>> = Default::default();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let s2 = slot.clone();
+        let task = rt.spawn(async move {
+            run(&cli, LoginProvider::Github, false, Arc::new(Notify::new()), s2, Duration::from_secs(20), |_| {}, |_| {}).await
+        });
+        let mut pid = None;
+        for _ in 0..100 {
+            pid = *slot.lock().unwrap();
+            if pid.is_some() && grandchild.exists() && !std::fs::read_to_string(&grandchild).unwrap().trim().is_empty() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        let pid = pid.expect("login pid recorded");
+        let gc: u32 = std::fs::read_to_string(&grandchild).unwrap().trim().parse().unwrap();
+        stop(&slot);
+        assert!(slot.lock().unwrap().is_none());
+        std::thread::sleep(Duration::from_millis(200));
+        assert!(!crate::supervisor::alive(pid), "login CLI should be stopped");
+        assert!(!crate::supervisor::alive(gc), "its process group should be stopped");
+        assert!(matches!(rt.block_on(task).unwrap(), LoginState::Failed { .. }));
+        assert!(slot.lock().unwrap().is_none());
+        stop(&slot); // no-op when idle
     }
 
     #[test]

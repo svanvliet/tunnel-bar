@@ -46,6 +46,8 @@ pub struct AppState {
     pub pins: Pins,
     pub login: Mutex<Option<LoginState>>,
     login_cancel: Mutex<Option<Arc<tokio::sync::Notify>>>,
+    /// PID (= process group) of the running `devtunnel user login`, so quitting can stop it synchronously.
+    login_pid: Arc<Mutex<Option<u32>>>,
     pub hotkey_error: Mutex<Option<String>>,
 }
 
@@ -58,6 +60,28 @@ pub fn check_delete(p: &DeletePreflight, confirm: bool, allow_hosted_elsewhere: 
     }
     if p.needs_confirm && !confirm {
         return Err(format!("{CONFIRM_REQUIRED}This tunnel wasn't created by Tunnel Bar. Confirm to delete it permanently."));
+    }
+    Ok(())
+}
+
+/// More hosts than the one this Mac runs means another machine hosts the tunnel too.
+pub fn hosted_elsewhere_count(host_connections: u32, hosting_here: bool) -> bool {
+    host_connections > hosting_here as u32
+}
+
+/// Label changes that would forge or drop Tunnel Bar ownership on a tunnel it didn't create are refused
+/// outright (ownership gates every confirm guard); expiration changes there need `confirm`.
+pub fn check_update(req: &UpdateTunnelRequest, created_by_app: bool, confirm: bool) -> Result<(), String> {
+    if created_by_app {
+        return Ok(());
+    }
+    if req.add_labels.iter().chain(&req.remove_labels).any(|l| l.eq_ignore_ascii_case(APP_LABEL)) {
+        return Err(format!("The “{APP_LABEL}” label can't be changed on a tunnel Tunnel Bar didn't create."));
+    }
+    if req.expiration.is_some() && !confirm {
+        return Err(format!(
+            "{CONFIRM_REQUIRED}This tunnel wasn't created by Tunnel Bar. Confirm to change its expiration; the service deletes it when it expires."
+        ));
     }
     Ok(())
 }
@@ -88,6 +112,7 @@ impl AppState {
                 pins: Pins::new(resolve),
                 login: Mutex::new(None),
                 login_cancel: Mutex::new(None),
+                login_pid: Default::default(),
                 hotkey_error: Mutex::new(None),
                 supervisor,
                 hoster: Supervisor::with_role(Role::Host, logs.clone(), listener)
@@ -501,8 +526,20 @@ impl AppState {
     }
 
     fn hosted_elsewhere(&self, id: &str) -> bool {
-        !self.hoster.is_active(id)
-            && self.cache.lock().unwrap().summaries.iter().any(|s| s.tunnel_id == id && s.host_connections > 0)
+        let here = self.hoster.is_active(id);
+        self.cache.lock().unwrap().summaries.iter().any(|s| s.tunnel_id == id && hosted_elsewhere_count(s.host_connections, here))
+    }
+
+    /// Re-reads one tunnel with `devtunnel show` so guards don't act on a list that may be a minute old.
+    async fn reload_summary(&self, cli: &Path, id: &str) -> Result<(), String> {
+        let d = cli::show(cli, id).await?;
+        let mut c = self.cache.lock().unwrap();
+        if let Some(s) = c.summaries.iter_mut().find(|s| s.tunnel_id == id) {
+            s.host_connections = d.host_connections;
+            s.labels = d.labels.clone();
+        }
+        c.details.insert(id.to_string(), d);
+        Ok(())
     }
 
     pub async fn host(self: &Arc<Self>, id: &str) -> Result<(), String> {
@@ -641,7 +678,13 @@ impl AppState {
 
     /// Edits description, labels, expiration and/or tunnel-level header rewriting. Header changes on
     /// a tunnel another machine hosts need `allow_hosted_elsewhere`.
-    pub async fn update_tunnel(self: &Arc<Self>, id: &str, mut req: UpdateTunnelRequest, allow_hosted_elsewhere: bool) -> Result<(), String> {
+    pub async fn update_tunnel(
+        self: &Arc<Self>,
+        id: &str,
+        mut req: UpdateTunnelRequest,
+        confirm: bool,
+        allow_hosted_elsewhere: bool,
+    ) -> Result<(), String> {
         req.headers = req.headers.normalized()?;
         if !req.headers.is_empty() {
             self.check_port_change(id, allow_hosted_elsewhere)?;
@@ -654,6 +697,7 @@ impl AppState {
             *d = d.trim().to_string();
         }
         req.expiration = req.expiration.as_deref().filter(|e| !e.trim().is_empty()).map(normalize_expiration).transpose()?;
+        check_update(&req, self.created_by_app(id), confirm)?;
         let cli = self.cli_path().await.ok_or("devtunnel CLI not found")?;
         cli::update(&cli, id, &req).await?;
         self.logs.push(id, "app", "Tunnel properties updated");
@@ -883,7 +927,8 @@ impl AppState {
         .await
     }
 
-    pub async fn set_anonymous(self: &Arc<Self>, id: &str, allow: bool) -> Result<(), String> {
+    pub async fn set_anonymous(self: &Arc<Self>, id: &str, allow: bool, confirm: bool) -> Result<(), String> {
+        self.check_access_change(id, confirm)?;
         let cli = self.cli_path().await.ok_or("devtunnel CLI not found")?;
         cli::set_anonymous(&cli, id, allow).await?;
         self.logs.push(
@@ -922,8 +967,9 @@ impl AppState {
     /// Deletes a tunnel. Tunnels Tunnel Bar didn't create need `confirm`; tunnels hosted by another
     /// machine (e.g. a dev box) also need `allow_hosted_elsewhere`.
     pub async fn delete_tunnel(self: &Arc<Self>, id: &str, confirm: bool, allow_hosted_elsewhere: bool) -> Result<(), String> {
-        check_delete(&self.delete_preflight(id)?, confirm, allow_hosted_elsewhere)?;
         let cli = self.cli_path().await.ok_or("devtunnel CLI not found")?;
+        self.reload_summary(&cli, id).await?;
+        check_delete(&self.delete_preflight(id)?, confirm, allow_hosted_elsewhere)?;
         self.hoster.disconnect(id);
         self.supervisor.disconnect(id);
         self.wait_stopped(id).await;
@@ -962,6 +1008,7 @@ impl AppState {
                 provider,
                 device_code,
                 cancel,
+                this.login_pid.clone(),
                 login::LOGIN_TIMEOUT,
                 move |st| {
                     *a.login.lock().unwrap() = Some(st.clone());
@@ -1020,6 +1067,8 @@ impl AppState {
         self.supervisor.shutdown();
         let _ = t.join();
         self.pins.stop_all();
+        // The login task won't get to run before the process exits; stop its CLI now.
+        login::stop(&self.login_pid);
         self.cancel_login();
     }
 
@@ -1187,6 +1236,37 @@ mod tests {
 
     fn pf(created_by_app: bool, hosted_elsewhere: bool) -> DeletePreflight {
         DeletePreflight { created_by_app, needs_confirm: !created_by_app, hosted_elsewhere, hosting_here: false, connected_here: false }
+    }
+
+    #[test]
+    fn update_guards_ownership_label_and_expiration() {
+        let req = |add: &[&str], remove: &[&str], exp: Option<&str>| UpdateTunnelRequest {
+            add_labels: add.iter().map(|s| s.to_string()).collect(),
+            remove_labels: remove.iter().map(|s| s.to_string()).collect(),
+            expiration: exp.map(Into::into),
+            ..Default::default()
+        };
+        // Forging/dropping ownership on a foreign tunnel is refused even with confirm.
+        for r in [req(&["tunnelbar"], &[], None), req(&["TunnelBar"], &[], None), req(&[], &["tunnelbar"], None)] {
+            let e = check_update(&r, false, true).unwrap_err();
+            assert!(!e.starts_with(CONFIRM_REQUIRED), "{e}");
+        }
+        // Expiration on a foreign tunnel (e.g. 1h on the dev-box SSH tunnel) needs confirm.
+        let exp = req(&[], &[], Some("1h"));
+        assert!(check_update(&exp, false, false).unwrap_err().starts_with(CONFIRM_REQUIRED));
+        assert!(check_update(&exp, false, true).is_ok());
+        // Other edits on foreign tunnels, and anything on our own tunnels, pass.
+        assert!(check_update(&req(&["work"], &["old"], None), false, false).is_ok());
+        assert!(check_update(&req(&[], &["tunnelbar"], Some("1h")), true, false).is_ok());
+    }
+
+    #[test]
+    fn hosted_elsewhere_counts_our_host() {
+        assert!(!hosted_elsewhere_count(0, false));
+        assert!(hosted_elsewhere_count(1, false));
+        assert!(!hosted_elsewhere_count(1, true));
+        // A dev box hosting while this Mac also hosts.
+        assert!(hosted_elsewhere_count(2, true));
     }
 
     #[test]
