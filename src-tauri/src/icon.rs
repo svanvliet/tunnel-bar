@@ -65,7 +65,7 @@ mod tests {
             assert_eq!((icon.width(), icon.height()), (width, 36));
             assert_eq!(icon.rgba().len(), (width * 36 * 4) as usize);
             assert_eq!(state.is_template(), cfg!(target_os = "macos"));
-            assert!(icon.rgba().chunks_exact(4).any(|p| p[3] > 200));
+            assert!(icon.rgba().chunks(4).any(|p| p[3] > 200));
             for other in &states[..i] {
                 assert_ne!(icon.rgba(), image(*other).rgba());
             }
@@ -73,7 +73,7 @@ mod tests {
         let alpha = |state| {
             image(state)
                 .rgba()
-                .chunks_exact(4)
+                .chunks(4)
                 .map(|p| p[3] as u32)
                 .sum::<u32>()
         };
@@ -92,7 +92,7 @@ mod tests {
             let icon = Image::from_bytes(bytes).unwrap();
             assert!(
                 icon.rgba()
-                    .chunks_exact(4)
+                    .chunks(4)
                     .all(|p| p[3] == 0 || p[..3] == [0, 0, 0])
             );
         }
@@ -112,13 +112,13 @@ mod tests {
         ] {
             let icon = Image::from_bytes(bytes).unwrap();
             assert_eq!((icon.width(), icon.height()), (36, 36));
-            assert!(icon.rgba().chunks_exact(4).any(|p| p[0] < 32 && p[3] > 200));
+            assert!(icon.rgba().chunks(4).any(|p| p[0] < 32 && p[3] > 200));
             assert!(
                 icon.rgba()
-                    .chunks_exact(4)
+                    .chunks(4)
                     .any(|p| p[0] > 223 && p[3] > 200)
             );
-            assert!(icon.rgba().chunks_exact(4).any(|p| p[3] == 0));
+            assert!(icon.rgba().chunks(4).any(|p| p[3] == 0));
         }
     }
 }
