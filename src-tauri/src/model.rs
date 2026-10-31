@@ -22,6 +22,25 @@ pub struct TunnelPort {
     pub port_uri: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+#[serde(rename_all = "camelCase", default)]
+pub struct AccessEntry {
+    #[serde(rename = "type")]
+    pub kind: String,
+    pub subjects: Vec<String>,
+    pub scopes: Vec<String>,
+    #[serde(alias = "deny")]
+    pub is_deny: bool,
+}
+
+impl AccessEntry {
+    pub fn allows_anonymous(&self) -> bool {
+        self.kind.eq_ignore_ascii_case("anonymous")
+            && !self.is_deny
+            && (self.scopes.is_empty() || self.scopes.iter().any(|s| s == "connect"))
+    }
+}
+
 /// Tunnel details as returned by `devtunnel show <id> -j`.
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
 #[serde(rename_all = "camelCase", default)]
@@ -32,6 +51,7 @@ pub struct TunnelDetails {
     pub labels: Vec<String>,
     pub description: String,
     pub ports: Vec<TunnelPort>,
+    pub access_control: Vec<AccessEntry>,
 }
 
 /// A local listener forwarding to a remote tunnel port.
@@ -40,6 +60,23 @@ pub struct TunnelDetails {
 pub struct Forward {
     pub local_port: u16,
     pub remote_port: u16,
+}
+
+/// Which `devtunnel` subcommand a supervised process runs.
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq, Hash)]
+#[serde(rename_all = "camelCase")]
+pub enum Role {
+    Connect,
+    Host,
+}
+
+impl Role {
+    pub fn subcommand(self) -> &'static str {
+        match self {
+            Role::Connect => "connect",
+            Role::Host => "host",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
@@ -52,7 +89,7 @@ pub enum ConnState {
     /// Process exited unexpectedly; waiting before the next attempt.
     Backoff { attempt: u32, retry_in_secs: u64, message: String },
     AuthRequired { message: String },
-    /// A `devtunnel connect` started outside this app.
+    /// A `devtunnel connect`/`host` started outside this app.
     External { pid: u32 },
 }
 
@@ -76,6 +113,8 @@ impl ConnState {
 pub struct TunnelSettings {
     pub nickname: Option<String>,
     pub auto_connect: bool,
+    /// Host this tunnel when TunnelBar starts.
+    pub auto_host: bool,
     /// ~/.ssh/config Host alias to use for "Open SSH" (port is overridden with -p).
     pub ssh_host: Option<String>,
 }
@@ -121,6 +160,36 @@ pub struct TunnelView {
     pub settings: TunnelSettings,
     /// Tunnel is running but no longer listed on the account.
     pub orphaned: bool,
+    pub host_state: ConnState,
+    /// Ports published by our `devtunnel host`, with public URLs.
+    pub hosted_ports: Vec<HostedPort>,
+    pub anonymous: bool,
+    /// Created by TunnelBar's "Expose local port" (label `tunnelbar`).
+    pub created_by_app: bool,
+    /// A host other than this app's is connected to the relay.
+    pub hosted_elsewhere: bool,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct HostedPort {
+    pub port: u16,
+    pub protocol: String,
+    pub uri: String,
+    pub inspect_uri: String,
+    /// Something is accepting connections on localhost:port.
+    pub listening: bool,
+}
+
+pub const APP_LABEL: &str = "tunnelbar";
+
+/// "https://abc-3000.usw3.devtunnels.ms/" -> "https://abc-3000-inspect.usw3.devtunnels.ms/"
+pub fn inspect_uri(port_uri: &str) -> String {
+    let Some(rest) = port_uri.strip_prefix("https://") else { return String::new() };
+    match rest.split_once('.') {
+        Some((host, domain)) if !host.is_empty() => format!("https://{host}-inspect.{domain}"),
+        _ => String::new(),
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -143,4 +212,24 @@ pub struct LogLine {
     pub ts: String,
     pub stream: String,
     pub text: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn derives_inspect_uri() {
+        assert_eq!(inspect_uri("https://abc-18765.usw3.devtunnels.ms/"), "https://abc-18765-inspect.usw3.devtunnels.ms/");
+        assert_eq!(inspect_uri(""), "");
+    }
+
+    #[test]
+    fn detects_anonymous_access() {
+        let e: AccessEntry = serde_json::from_str(r#"{"type":"Anonymous","subjects":[],"scopes":["connect"]}"#).unwrap();
+        assert!(e.allows_anonymous());
+        let d: AccessEntry =
+            serde_json::from_str(r#"{"type":"Anonymous","subjects":[],"scopes":["connect"],"isDeny":true}"#).unwrap();
+        assert!(!d.allows_anonymous());
+    }
 }

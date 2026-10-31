@@ -154,9 +154,91 @@ pub async fn show(cli: &Path, id: &str) -> Result<TunnelDetails, String> {
     parse_show(&out.stdout)
 }
 
+async fn ok(cli: &Path, args: &[&str]) -> Result<String, String> {
+    let out = run(cli, args, Duration::from_secs(45)).await?;
+    if !out.success {
+        return Err(err_text(&out));
+    }
+    Ok(out.stdout)
+}
+
+#[derive(Deserialize)]
+struct CreateResponse {
+    tunnel: CreatedTunnel,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CreatedTunnel {
+    tunnel_id: String,
+}
+
+pub fn parse_create(stdout: &str) -> Result<String, String> {
+    serde_json::from_str::<CreateResponse>(json_slice(stdout))
+        .map(|r| r.tunnel.tunnel_id)
+        .map_err(|e| format!("could not parse `devtunnel create -j`: {e}"))
+}
+
+/// Creates a tunnel with a CLI-generated id; returns "name.cluster".
+pub async fn create(cli: &Path, labels: &[&str], description: &str) -> Result<String, String> {
+    let mut args = vec!["create", "-j", "-d", description];
+    for l in labels {
+        args.extend(["-l", l]);
+    }
+    parse_create(&ok(cli, &args).await?)
+}
+
+pub async fn port_create(cli: &Path, id: &str, port: u16, protocol: &str) -> Result<(), String> {
+    let port = port.to_string();
+    ok(cli, &["port", "create", id, "-p", &port, "--protocol", protocol, "-j"]).await.map(|_| ())
+}
+
+pub async fn delete(cli: &Path, id: &str) -> Result<(), String> {
+    ok(cli, &["delete", id, "-f"]).await.map(|_| ())
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AccessList {
+    #[serde(default)]
+    access_control_entries: Vec<crate::model::AccessEntry>,
+}
+
+pub fn parse_access_list(stdout: &str) -> Result<Vec<crate::model::AccessEntry>, String> {
+    serde_json::from_str::<AccessList>(json_slice(stdout))
+        .map(|r| r.access_control_entries)
+        .map_err(|e| format!("could not parse `devtunnel access list -j`: {e}"))
+}
+
+/// Allows or revokes anonymous (no sign-in) connect access at the tunnel level.
+pub async fn set_anonymous(cli: &Path, id: &str, allow: bool) -> Result<(), String> {
+    if allow {
+        return ok(cli, &["access", "create", id, "--anonymous", "-j"]).await.map(|_| ());
+    }
+    // Delete from the highest index down so earlier indexes stay valid.
+    let entries = parse_access_list(&ok(cli, &["access", "list", id, "-j"]).await?)?;
+    for i in (0..entries.len()).rev().filter(|&i| entries[i].kind.eq_ignore_ascii_case("anonymous")) {
+        let idx = i.to_string();
+        ok(cli, &["access", "delete", id, "-i", &idx, "-j"]).await?;
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parses_create_and_access() {
+        let id = parse_create(r#"{"tunnel":{"tunnelId":"abc-123.usw3","accessControl":[]}}"#).unwrap();
+        assert_eq!(id, "abc-123.usw3");
+        let acl = parse_access_list(
+            r#"{"accessControlEntries":[{"type":"Anonymous","subjects":[],"scopes":["connect"]}]}"#,
+        )
+        .unwrap();
+        assert!(acl[0].allows_anonymous());
+        assert!(parse_access_list(r#"{"accessControlEntries":[]}"#).unwrap().is_empty());
+    }
 
     #[test]
     fn parses_list_json() {

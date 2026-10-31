@@ -1,4 +1,4 @@
-//! Parses `devtunnel connect` output lines into events.
+//! Parses `devtunnel connect` / `devtunnel host` output lines into events.
 //!
 //! The CLI output is not a stable API, so unknown lines are ignored (they are still logged).
 //! Message strings mirror the dev-tunnels SDK traces (TunnelRelayConnection, RetryTcpListenerFactory).
@@ -15,7 +15,14 @@ pub enum CliEvent {
     Closed { message: String },
     AuthRequired { message: String },
     Error { message: String },
+    /// `host`: "Hosting port: 3000" (older CLIs: "Hosting port 3000 at https://…").
+    HostingPort { port: u16 },
+    /// `host`: "Ready to accept connections for tunnel: x.usw3"
+    Ready,
+    Warning { message: String },
 }
+
+static HOSTING: Lazy<Regex> = Lazy::new(|| Regex::new(r"^Hosting port:?\s*(?P<p>\d+)").unwrap());
 
 static CONNECTED: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"^Connected to tunnel:\s*(?P<name>\S*)").unwrap());
@@ -50,6 +57,15 @@ pub fn parse_line(raw: &str) -> Option<CliEvent> {
             local_port: lp,
             remote_port: rp,
         });
+    }
+    if let Some(c) = HOSTING.captures(line) {
+        return c["p"].parse().ok().map(|port| CliEvent::HostingPort { port });
+    }
+    if line.starts_with("Ready to accept connections") {
+        return Some(CliEvent::Ready);
+    }
+    if let Some(w) = line.strip_prefix("Warning:") {
+        return Some(CliEvent::Warning { message: w.trim().to_string() });
     }
     if line.contains("tunnel relay restored") {
         return Some(CliEvent::Restored);
@@ -86,6 +102,17 @@ mod tests {
                 CliEvent::Forward { local_addr: "127.0.0.1".into(), local_port: 2223, remote_port: 2222 },
                 CliEvent::Forward { local_addr: "::1".into(), local_port: 2223, remote_port: 2222 },
             ]
+        );
+    }
+
+    #[test]
+    fn parses_real_host_output() {
+        let events: Vec<_> = include_str!("../tests/fixtures/host_ok.txt").lines().filter_map(parse_line).collect();
+        assert_eq!(events, vec![CliEvent::Restored, CliEvent::HostingPort { port: 18765 }, CliEvent::Ready]);
+        assert_eq!(parse_line("Hosting port 3000 at https://x-3000.usw3.devtunnels.ms/"), Some(CliEvent::HostingPort { port: 3000 }));
+        assert_eq!(
+            parse_line("Warning: Tunnel does not have any ports!"),
+            Some(CliEvent::Warning { message: "Tunnel does not have any ports!".into() })
         );
     }
 

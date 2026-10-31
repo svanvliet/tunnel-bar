@@ -1,7 +1,7 @@
-//! Supervises one `devtunnel connect <id>` child process per tunnel.
+//! Supervises one `devtunnel connect|host <id>` child process per tunnel (one Supervisor per role).
 
 use crate::logs::LogStore;
-use crate::model::{ConnState, Forward};
+use crate::model::{ConnState, Forward, Role};
 use crate::parser::{parse_line, CliEvent};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::PathBuf;
@@ -17,7 +17,7 @@ const STOP_GRACE: Duration = Duration::from_secs(3);
 
 #[derive(Debug, Clone)]
 pub enum SupEvent {
-    Changed { id: String, prev: ConnState, next: ConnState },
+    Changed { role: Role, id: String, prev: ConnState, next: ConnState },
     Log { id: String, line: crate::model::LogLine },
 }
 
@@ -49,6 +49,7 @@ impl Managed {
 
 #[derive(Clone)]
 pub struct Supervisor {
+    role: Role,
     inner: Arc<Mutex<HashMap<String, Managed>>>,
     logs: Arc<LogStore>,
     listener: Listener,
@@ -68,7 +69,11 @@ enum RunEnd {
 
 impl Supervisor {
     pub fn new(logs: Arc<LogStore>, listener: Listener) -> Self {
-        Self { inner: Arc::new(Mutex::new(HashMap::new())), logs, listener, pidfile: None }
+        Self::with_role(Role::Connect, logs, listener)
+    }
+
+    pub fn with_role(role: Role, logs: Arc<LogStore>, listener: Listener) -> Self {
+        Self { role, inner: Arc::new(Mutex::new(HashMap::new())), logs, listener, pidfile: None }
     }
 
     pub fn with_pidfile(mut self, path: PathBuf) -> Self {
@@ -120,11 +125,15 @@ impl Supervisor {
             }
             std::mem::replace(&mut e.state, next.clone())
         };
-        (self.listener)(SupEvent::Changed { id: id.to_string(), prev, next });
+        (self.listener)(SupEvent::Changed { role: self.role, id: id.to_string(), prev, next });
     }
 
     fn log(&self, id: &str, stream: &str, text: &str) {
-        let line = self.logs.push(id, stream, text);
+        let stream = match self.role {
+            Role::Connect => stream.to_string(),
+            Role::Host => format!("host-{stream}"),
+        };
+        let line = self.logs.push(id, &stream, text);
         (self.listener)(SupEvent::Log { id: id.to_string(), line });
     }
 
@@ -240,7 +249,7 @@ impl Supervisor {
 
     async fn run_child(&self, id: &str, cli: &PathBuf, generation: u64, wake: &Notify) -> RunEnd {
         let mut cmd = Command::new(cli);
-        cmd.args(["connect", id]).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).kill_on_drop(true);
+        cmd.args([self.role.subcommand(), id]).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).kill_on_drop(true);
         #[cfg(unix)]
         cmd.process_group(0);
         #[cfg(windows)]
@@ -323,11 +332,16 @@ impl Supervisor {
         self.log(id, stream, line);
         let Some(ev) = parse_line(line) else { return };
         match ev {
-            CliEvent::Connected { .. } | CliEvent::Restored => {
+            CliEvent::Connected { .. } | CliEvent::Restored | CliEvent::Ready => {
                 *was_connected = true;
                 self.set_state(id, Some(generation), ConnState::Connected);
             }
-            CliEvent::Forward { local_port, remote_port, .. } => {
+            CliEvent::Forward { .. } | CliEvent::HostingPort { .. } => {
+                let (local_port, remote_port) = match ev {
+                    CliEvent::Forward { local_port, remote_port, .. } => (local_port, remote_port),
+                    CliEvent::HostingPort { port } => (port, port),
+                    _ => unreachable!(),
+                };
                 *was_connected = true;
                 let added = {
                     let mut m = self.inner.lock().unwrap();
@@ -336,14 +350,18 @@ impl Supervisor {
                         .map(|e| e.forwards.insert(Forward { local_port, remote_port }))
                         .unwrap_or(false)
                 };
-                self.set_state(id, Some(generation), ConnState::Connected);
+                if self.role == Role::Connect {
+                    self.set_state(id, Some(generation), ConnState::Connected);
+                }
                 if added {
                     let s = self.state(id).0;
-                    (self.listener)(SupEvent::Changed { id: id.to_string(), prev: s.clone(), next: s });
+                    (self.listener)(SupEvent::Changed { role: self.role, id: id.to_string(), prev: s.clone(), next: s });
                 }
             }
             CliEvent::Reconnecting => self.set_state(id, Some(generation), ConnState::Reconnecting),
-            CliEvent::Closed { message } | CliEvent::Error { message } => *last_msg = message,
+            CliEvent::Closed { message } | CliEvent::Error { message } | CliEvent::Warning { message } => {
+                *last_msg = message
+            }
             CliEvent::AuthRequired { message } => {
                 *last_msg = message;
                 *auth = true;
@@ -373,16 +391,16 @@ impl Supervisor {
     }
 }
 
-/// Stops `devtunnel connect` children left behind by a previous instance that died without cleanup
-/// (SIGKILL, crash). Returns the tunnel ids so they can be reconnected under management.
-pub fn reclaim_orphans(pidfile: &std::path::Path) -> Vec<String> {
+/// Stops `devtunnel connect|host` children left behind by a previous instance that died without cleanup
+/// (SIGKILL, crash). Returns the tunnel ids so they can be restarted under management.
+pub fn reclaim_orphans(pidfile: &std::path::Path, role: Role) -> Vec<String> {
     let mut running: Option<Vec<crate::external::ExternalConn>> = None;
     reclaim_orphans_with(pidfile, |pid, id| {
-        // Only signal PIDs that are still a `devtunnel connect` for the recorded tunnel (PIDs get reused).
+        // Only signal PIDs that are still a devtunnel of this role for the recorded tunnel (PIDs get reused).
         running
             .get_or_insert_with(|| crate::external::scan(&[]))
             .iter()
-            .any(|c| c.pid == pid && crate::external::matches_tunnel(&c.tunnel_arg, id))
+            .any(|c| c.pid == pid && c.role == role && crate::external::matches_tunnel(&c.tunnel_arg, id))
     })
 }
 
@@ -522,6 +540,37 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn hosts_with_host_subcommand_and_tracks_hosted_ports() {
+        let dir = tempfile::tempdir().unwrap();
+        let fixture = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/host_ok.txt");
+        // Only succeed when invoked as `host <id>`.
+        let cli = fake_cli(dir.path(), &format!("[ \"$1\" = host ] || exit 9\ncat '{fixture}'\nexec sleep 30"));
+        let logs = Arc::new(LogStore::new(dir.path().join("logs")));
+        let roles = Arc::new(Mutex::new(Vec::new()));
+        let r2 = roles.clone();
+        let listener: Listener = Arc::new(move |ev| {
+            if let SupEvent::Changed { role, .. } = ev {
+                r2.lock().unwrap().push(role);
+            }
+        });
+        let s = Supervisor::with_role(Role::Host, logs.clone(), listener);
+        s.connect("t.usw3", cli);
+        wait_for(&s, "t.usw3", |st| *st == ConnState::Connected);
+        for _ in 0..40 {
+            if !s.state("t.usw3").1.is_empty() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        assert_eq!(s.state("t.usw3").1, vec![Forward { local_port: 18765, remote_port: 18765 }]);
+        assert!(roles.lock().unwrap().iter().all(|r| *r == Role::Host));
+        assert!(logs.get("t.usw3").iter().any(|l| l.stream == "host-out" && l.text.starts_with("Ready")));
+        s.disconnect("t.usw3");
+        wait_for(&s, "t.usw3", |st| *st == ConnState::Disconnected);
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn crashing_child_backs_off_then_stops_on_disconnect() {
         let dir = tempfile::tempdir().unwrap();
         let cli = fake_cli(dir.path(), "echo 'Error: host not available'\nexit 3");
@@ -546,6 +595,69 @@ mod tests {
         std::thread::sleep(Duration::from_millis(300));
         assert!(!s.is_active("t.usw3"));
         assert!(s.managed_pids().is_empty());
+    }
+
+    /// Live: serve "tunnelbar-live-ok" on the tunnel port, then `TUNNELBAR_LIVE_HOST=<id> cargo test live_host -- --ignored`.
+    #[cfg(unix)]
+    #[test]
+    #[ignore]
+    fn live_host_and_connect_through_it() {
+        // TUNNELBAR_LIVE_HOST=<tunnel with an http port served by a local server on that port>
+        let id = std::env::var("TUNNELBAR_LIVE_HOST").expect("set TUNNELBAR_LIVE_HOST");
+        let cli = tauri::async_runtime::block_on(crate::cli::find_cli(None)).expect("devtunnel CLI");
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        // Anonymous access round-trip while nothing is hosted.
+        rt.block_on(crate::cli::set_anonymous(&cli, &id, true)).unwrap();
+        let d = rt.block_on(crate::cli::show(&cli, &id)).unwrap();
+        assert!(d.access_control.iter().any(|a| a.allows_anonymous()), "anonymous added: {:?}", d.access_control);
+        rt.block_on(crate::cli::set_anonymous(&cli, &id, false)).unwrap();
+        let d = rt.block_on(crate::cli::show(&cli, &id)).unwrap();
+        assert!(!d.access_control.iter().any(|a| a.allows_anonymous()), "anonymous removed");
+
+        let dir = tempfile::tempdir().unwrap();
+        let logs = Arc::new(LogStore::new(dir.path().join("logs")));
+        let host = Supervisor::with_role(Role::Host, logs.clone(), Arc::new(|_| {}));
+        host.connect(&id, cli.clone());
+        for _ in 0..600 {
+            if host.state(&id).0 == ConnState::Connected && !host.state(&id).1.is_empty() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        let (st, hosted) = host.state(&id);
+        eprintln!("host state={st:?} hosted={hosted:?}");
+        assert_eq!(st, ConnState::Connected);
+        let port = hosted[0].remote_port;
+        std::thread::sleep(Duration::from_secs(2));
+
+        let client = Supervisor::new(logs.clone(), Arc::new(|_| {}));
+        client.connect(&id, cli);
+        for _ in 0..600 {
+            if !client.state(&id).1.is_empty() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        let local = client.state(&id).1[0].local_port;
+        assert_ne!(local, port, "client must pick another local port");
+        let body = {
+            use std::io::{Read, Write};
+            let mut c = std::net::TcpStream::connect(("127.0.0.1", local)).unwrap();
+            c.set_read_timeout(Some(Duration::from_secs(15))).unwrap();
+            c.write_all(b"GET / HTTP/1.0\r\nHost: localhost\r\n\r\n").unwrap();
+            let mut s = String::new();
+            let _ = c.read_to_string(&mut s);
+            s
+        };
+        eprintln!("response head={:?}", body.lines().next());
+        assert!(body.starts_with("HTTP/1."), "HTTP through hosted tunnel");
+        assert!(body.contains("tunnelbar-live-ok"), "served by the local test server");
+        let pids = [host.managed_pids(), client.managed_pids()].concat();
+        client.disconnect(&id);
+        host.disconnect(&id);
+        wait_for(&host, &id, |st| *st == ConnState::Disconnected);
+        std::thread::sleep(Duration::from_millis(500));
+        assert!(pids.iter().all(|&p| !alive(p)));
     }
 
     /// Live test against the real CLI and account: `TUNNELBAR_LIVE_TUNNEL=<id> cargo test live_ -- --ignored`.

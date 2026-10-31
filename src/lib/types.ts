@@ -9,7 +9,8 @@ export type ConnState =
 
 export interface Forward { localPort: number; remotePort: number }
 export interface TunnelPort { portNumber: number; protocol: string; portUri: string }
-export interface TunnelSettings { nickname?: string | null; autoConnect: boolean; sshHost?: string | null }
+export interface TunnelSettings { nickname?: string | null; autoConnect: boolean; autoHost: boolean; sshHost?: string | null }
+export interface HostedPort { port: number; protocol: string; uri: string; inspectUri: string; listening: boolean }
 export interface TunnelSummary {
   tunnelId: string; name: string; hostConnections: number; labels: string[];
   portCount: number; tunnelExpiration: string; description: string;
@@ -17,6 +18,7 @@ export interface TunnelSummary {
 export interface TunnelView {
   id: string; displayName: string; summary: TunnelSummary; ports: TunnelPort[];
   state: ConnState; forwards: Forward[]; settings: TunnelSettings; orphaned: boolean;
+  hostState: ConnState; hostedPorts: HostedPort[]; anonymous: boolean; createdByApp: boolean; hostedElsewhere: boolean;
 }
 export interface Settings {
   cliPath?: string | null; launchAtLogin: boolean; notifications: boolean;
@@ -52,3 +54,13 @@ export function tone(s: ConnState): "ok" | "busy" | "bad" | "off" {
 }
 
 export const isActive = (s: ConnState) => s.kind !== "disconnected" && s.kind !== "authRequired" && s.kind !== "external";
+
+export function hostLabel(s: ConnState): string {
+  switch (s.kind) {
+    case "connecting": return "Starting host…";
+    case "connected": return "Hosting";
+    case "reconnecting": return "Host reconnecting…";
+    case "external": return `Hosted outside TunnelBar (pid ${s.pid})`;
+    default: return stateLabel(s);
+  }
+}

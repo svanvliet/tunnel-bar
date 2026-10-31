@@ -1,0 +1,6 @@
+Connection to host tunnel relay restored.
+Hosting port: 18765
+Connect via browser: https://abcd1234-18765.usw3.devtunnels.ms
+Inspect network activity: https://abcd1234-18765-inspect.usw3.devtunnels.ms
+
+Ready to accept connections for tunnel: tunnelbar-test-1793483012.usw3

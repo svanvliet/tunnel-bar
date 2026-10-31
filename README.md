@@ -1,8 +1,10 @@
 # TunnelBar
 
-A macOS menu-bar app for managing [Microsoft Dev Tunnels](https://learn.microsoft.com/azure/developer/dev-tunnels/) client connections. It wraps the `devtunnel` CLI, so it uses your existing CLI sign-in.
+A macOS menu-bar app for managing [Microsoft Dev Tunnels](https://learn.microsoft.com/azure/developer/dev-tunnels/): connect to tunnels and host your own. It wraps the `devtunnel` CLI, so it uses your existing CLI sign-in.
 
-## Features (Phase 1 MVP)
+## Features
+
+### Connections
 
 - Lists every tunnel on your account, with host online/offline status.
 - Connect and disconnect, with auto-reconnect using exponential backoff. Stops retrying on auth errors.
@@ -13,6 +15,14 @@ A macOS menu-bar app for managing [Microsoft Dev Tunnels](https://learn.microsof
 - Notifications on unexpected drops and reconnects.
 - Optional local nicknames (double-click a tunnel name).
 - Never orphans connections: stops children on Quit/SIGTERM, and reclaims any left by a crash on next launch.
+
+### Hosting
+
+- **＋ Expose a local port**: creates a tunnel labelled `tunnelbar`, adds the port (http/https/auto), and hosts it from this Mac.
+- **Host here** / **Stop hosting** for your own tunnels, with optional **Auto-host** on launch and auto-restart.
+- Shows each hosted port's public URL (open/copy) and Inspect link, and warns when nothing is listening locally.
+- Access control: private (your account) by default; **Make public…** adds anonymous access after confirmation; **Require sign-in** removes it.
+- Delete tunnels that TunnelBar created. Tunnels hosted by another machine (e.g. a dev box) are never hosted or deleted from here.
 
 ## Requirements
 
@@ -43,7 +53,8 @@ codesign --force --deep -s - src-tauri/target/release/bundle/macos/TunnelBar.app
 cd src-tauri
 cargo test                         # unit + fake-CLI supervisor tests
 cargo clippy --all-targets -- -D warnings
-TUNNELBAR_LIVE_TUNNEL=<tunnel-id> cargo test live_ -- --ignored --nocapture   # real CLI
+TUNNELBAR_LIVE_TUNNEL=<tunnel-id> cargo test live_connect -- --ignored --nocapture   # real CLI
+TUNNELBAR_LIVE_HOST=<tunnel-id> cargo test live_host -- --ignored --nocapture   # tunnel with an http port served locally
 cd .. && npm run check
 ```
 
@@ -54,11 +65,12 @@ cd .. && npm run check
 | `TUNNELBAR_TRACE=1` | (debug builds) print each state snapshot to stderr |
 | `TUNNELBAR_PIN=1` | keep the popover open when it loses focus |
 | `TUNNELBAR_LIVE_TUNNEL` | tunnel id for the ignored live integration test |
+| `TUNNELBAR_LIVE_HOST` | tunnel id for the ignored live hosting test |
 
 ## Roadmap
 
-1. **Phase 1 – connection management MVP** (this release)
-2. Phase 2 – hosting (`devtunnel host`) from the menu bar
+1. ~~Phase 1 – connection management MVP~~ (v0.1.0)
+2. ~~Phase 2 – hosting (`devtunnel host`) from the menu bar~~ (v0.2.0)
 3. Phase 3 – tunnel management (create, delete, ports, access)
 4. Phase 4 – Windows tray version
 5. Phase 5 – signed/notarized DMG, auto-update, CI releases

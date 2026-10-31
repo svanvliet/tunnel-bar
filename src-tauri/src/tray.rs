@@ -49,7 +49,7 @@ fn state_label(s: &ConnState) -> String {
 fn menu_signature(snap: &Snapshot) -> String {
     snap.tunnels
         .iter()
-        .map(|t| format!("{}|{}|{}|{:?}", t.id, t.display_name, state_label(&t.state), t.forwards))
+        .map(|t| format!("{}|{}|{}|{:?}|{}", t.id, t.display_name, state_label(&t.state), t.forwards, state_label(&t.host_state)))
         .collect::<Vec<_>>()
         .join(";")
 }
@@ -79,16 +79,33 @@ fn build_menu<R: Runtime>(app: &AppHandle<R>, snap: &Snapshot) -> tauri::Result<
         menu.append(&MenuItem::with_id(app, "none", "No tunnels", false, None::<&str>)?)?;
     }
     for t in &snap.tunnels {
-        let dot = match &t.state {
-            s if s.is_up() => "●",
-            s if s.is_problem() => "⚠︎",
-            s if s.is_transitional() => "◐",
+        let dot = match (&t.state, &t.host_state) {
+            (s, h) if s.is_problem() || h.is_problem() => "⚠︎",
+            (s, h) if s.is_transitional() || h.is_transitional() => "◐",
+            (s, h) if s.is_up() || h.is_up() => "●",
             _ => "○",
         };
         let ports = t.forwards.iter().map(|f| format!(":{}", f.local_port)).collect::<Vec<_>>().join(" ");
-        let label = format!("{dot} {} — {}{}", t.display_name, state_label(&t.state), if ports.is_empty() { String::new() } else { format!("  {ports}") });
+        let hosting = match &t.host_state {
+            ConnState::Disconnected => String::new(),
+            ConnState::Connected | ConnState::External { .. } => "  · hosting".into(),
+            s => format!("  · host: {}", state_label(s)),
+        };
+        let conn = if matches!(t.state, ConnState::Disconnected) && !hosting.is_empty() { "" } else { &state_label(&t.state) };
+        let label = format!(
+            "{dot} {}{}{conn}{}{hosting}",
+            t.display_name,
+            if conn.is_empty() { "" } else { " — " },
+            if ports.is_empty() { String::new() } else { format!("  {ports}") }
+        );
         let enabled = !matches!(t.state, ConnState::External { .. });
-        menu.append(&MenuItem::with_id(app, format!("toggle:{}", t.id), label, enabled, None::<&str>)?)?;
+        // Tunnels TunnelBar exposed are for hosting; clicking toggles the host instead of a client connection.
+        let (action, enabled) = if t.created_by_app {
+            ("hosttoggle", !matches!(t.host_state, ConnState::External { .. }))
+        } else {
+            ("toggle", enabled)
+        };
+        menu.append(&MenuItem::with_id(app, format!("{action}:{}", t.id), label, enabled, None::<&str>)?)?;
     }
     menu.append(&PredefinedMenuItem::separator(app)?)?;
     menu.append(&MenuItem::with_id(app, "open", "Open TunnelBar…", true, None::<&str>)?)?;
@@ -107,7 +124,16 @@ fn handle_menu(app: &AppHandle, id: &str) {
         }
         "quit" => quit(app),
         _ => {
-            if let Some(tid) = id.strip_prefix("toggle:") {
+            if let Some(tid) = id.strip_prefix("hosttoggle:") {
+                let tid = tid.to_string();
+                tauri::async_runtime::spawn(async move {
+                    if st.hoster.is_active(&tid) {
+                        st.stop_host(&tid);
+                    } else if let Err(e) = st.host(&tid).await {
+                        st.logs.push(&tid, "app", &e);
+                    }
+                });
+            } else if let Some(tid) = id.strip_prefix("toggle:") {
                 let tid = tid.to_string();
                 tauri::async_runtime::spawn(async move {
                     if st.supervisor.is_active(&tid) {
@@ -122,7 +148,7 @@ fn handle_menu(app: &AppHandle, id: &str) {
 }
 
 pub fn quit(app: &AppHandle) {
-    app::state(app).supervisor.shutdown();
+    app::state(app).shutdown();
     app.exit(0);
 }
 

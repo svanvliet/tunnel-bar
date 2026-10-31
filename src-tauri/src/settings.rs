@@ -19,6 +19,10 @@ pub fn pidfile_path() -> PathBuf {
     config_dir().join("children.json")
 }
 
+pub fn hosts_pidfile_path() -> PathBuf {
+    config_dir().join("hosts.json")
+}
+
 fn settings_path() -> PathBuf {
     config_dir().join("settings.json")
 }
@@ -62,7 +66,7 @@ mod tests {
         let mut s = Settings::default();
         s.tunnels.insert(
             "a.usw3".into(),
-            TunnelSettings { nickname: Some("Dev".into()), auto_connect: true, ssh_host: None },
+            TunnelSettings { nickname: Some("Dev".into()), auto_connect: true, auto_host: true, ssh_host: None },
         );
         save_to(&p, &s).unwrap();
         assert_eq!(load_from(&p), s);

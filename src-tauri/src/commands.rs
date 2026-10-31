@@ -27,6 +27,31 @@ pub fn disconnect(state: State<'_, Shared>, id: String) {
 }
 
 #[tauri::command]
+pub async fn host(state: State<'_, Shared>, id: String) -> Result<(), String> {
+    state.inner().clone().host(&id).await
+}
+
+#[tauri::command]
+pub fn stop_host(state: State<'_, Shared>, id: String) {
+    state.inner().stop_host(&id);
+}
+
+#[tauri::command]
+pub async fn expose_port(state: State<'_, Shared>, port: u16, protocol: String, anonymous: bool) -> Result<String, String> {
+    state.inner().clone().expose(port, &protocol, anonymous).await
+}
+
+#[tauri::command]
+pub async fn set_anonymous(state: State<'_, Shared>, id: String, allow: bool) -> Result<(), String> {
+    state.inner().clone().set_anonymous(&id, allow).await
+}
+
+#[tauri::command]
+pub async fn delete_tunnel(state: State<'_, Shared>, id: String) -> Result<(), String> {
+    state.inner().clone().delete_tunnel(&id).await
+}
+
+#[tauri::command]
 pub async fn stop_external(state: State<'_, Shared>, id: String) -> Result<(), String> {
     state.inner().clone().stop_external(&id).await
 }

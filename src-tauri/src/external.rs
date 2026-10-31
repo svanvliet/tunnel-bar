@@ -1,40 +1,58 @@
-//! Detects `devtunnel connect <id>` processes not started by this app.
+//! Detects `devtunnel connect|host <id>` processes not started by this app.
 
-use crate::model::Forward;
+use crate::model::{Forward, Role};
 use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct ExternalConn {
     pub pid: u32,
+    pub role: Role,
     /// Tunnel id as passed on the command line (may lack the ".cluster" suffix, or be empty for the default tunnel).
     pub tunnel_arg: String,
 }
 
 /// Extracts the tunnel argument from a devtunnel command line, if it is a `connect` invocation.
+#[cfg(test)]
 pub fn parse_cmdline(args: &[String]) -> Option<String> {
+    parse_cmdline_role(args).filter(|(r, _)| *r == Role::Connect).map(|(_, a)| a)
+}
+
+/// Extracts the role and tunnel argument from a devtunnel `connect` or `host` command line.
+pub fn parse_cmdline_role(args: &[String]) -> Option<(Role, String)> {
     let exe = args.first()?;
     let exe_name = std::path::Path::new(exe).file_name()?.to_string_lossy().to_lowercase();
     if !exe_name.contains("devtunnel") {
         return None;
     }
     let mut it = args.iter().skip(1);
-    it.by_ref().find(|a| a.as_str() == "connect")?;
+    let role = it.by_ref().find_map(|a| match a.as_str() {
+        "connect" => Some(Role::Connect),
+        "host" => Some(Role::Host),
+        _ => None,
+    })?;
+    let takes_value: &[&str] = match role {
+        Role::Connect => &["-t", "--access-token"],
+        Role::Host => &[
+            "-t", "--access-token", "-p", "--port-numbers", "--protocol", "-e", "--expiration", "-l", "--labels", "-d",
+            "--description",
+        ],
+    };
     let mut skip_value = false;
     for a in it {
         if skip_value {
             skip_value = false;
             continue;
         }
-        if matches!(a.as_str(), "-t" | "--access-token") {
+        if takes_value.contains(&a.as_str()) {
             skip_value = true;
             continue;
         }
         if a.starts_with('-') {
             continue;
         }
-        return Some(a.clone());
+        return Some((role, a.clone()));
     }
-    Some(String::new())
+    Some((role, String::new()))
 }
 
 /// Whether an external tunnel argument refers to the given account tunnel id ("name.cluster").
@@ -62,8 +80,8 @@ pub fn scan(exclude_pids: &[u32]) -> Vec<ExternalConn> {
             continue;
         }
         let args: Vec<String> = p.cmd().iter().map(|s| s.to_string_lossy().into_owned()).collect();
-        if let Some(tunnel_arg) = parse_cmdline(&args) {
-            found.push(ExternalConn { pid, tunnel_arg });
+        if let Some((role, tunnel_arg)) = parse_cmdline_role(&args) {
+            found.push(ExternalConn { pid, role, tunnel_arg });
         }
     }
     // A wrapper and the real binary can both match; keep the parent only.
@@ -137,6 +155,11 @@ mod tests {
         assert_eq!(parse_cmdline(&v(&["devtunnel", "connect"])), Some(String::new()));
         assert_eq!(parse_cmdline(&v(&["devtunnel", "host", "x"])), None);
         assert_eq!(parse_cmdline(&v(&["ssh", "connect", "x"])), None);
+        assert_eq!(parse_cmdline_role(&v(&["devtunnel", "host", "x.usw3"])), Some((Role::Host, "x.usw3".into())));
+        assert_eq!(
+            parse_cmdline_role(&v(&["devtunnel", "host", "-p", "3000", "--protocol", "http"])),
+            Some((Role::Host, String::new()))
+        );
     }
 
     #[test]

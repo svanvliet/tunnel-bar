@@ -98,6 +98,11 @@ pub fn run() {
             commands::open_login,
             commands::open_url,
             commands::quit,
+            commands::host,
+            commands::stop_host,
+            commands::expose_port,
+            commands::set_anonymous,
+            commands::delete_tunnel,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application");
@@ -109,7 +114,7 @@ pub fn run() {
         RunEvent::Reopen { .. } => tray::show_window(handle),
         RunEvent::Exit => {
             if let Some(s) = handle.try_state::<app::Shared>() {
-                s.supervisor.shutdown();
+                s.shutdown();
             }
         }
         _ => {}
