@@ -18,6 +18,7 @@ const fixture = {
   lastRefresh: new Date().toISOString(), refreshError: null, logDir: "/example/logs/TunnelBar",
   settings: { cliPath: null, launchAtLogin: true, notifications: true, firstRunDone: true, tunnels: {}, hotkey: "CmdOrCtrl+Alt+Shift+T", labelFilter: [] },
   allLabels: ["development", "preview", "tunnelbar"], login: null, hotkeyError: null,
+  update: { status: "upToDate", currentVersion: "0.2.0", enabled: true, version: null, notes: null, progress: null, lastChecked: new Date(Date.now() - 12 * 60_000).toISOString(), error: null },
   tunnels: [
     {
       id: "example-ssh.test", displayName: "Development SSH", createdByApp: false,
@@ -163,6 +164,8 @@ function installFakeIPC(initial) {
         case "stop_host": t.hostState = { kind: "disconnected" }; t.hostedPorts = []; fake.publish(); return;
         case "connect": case "adopt_external": t.state = { kind: "connecting" }; fake.publish(); return;
         case "disconnect": case "stop_external": t.state = { kind: "disconnected" }; t.forwards = []; fake.publish(); return;
+        case "check_for_updates": Object.assign(fake.snapshot.update, { status: "upToDate", lastChecked: new Date().toISOString(), error: null }); fake.publish(); return;
+        case "install_update": fake.snapshot.update.status = "installing"; fake.publish(); return;
         case "expose_port": return args.name || "example-created.test";
         case "open_ssh": case "open_url": case "open_login": case "open_log_dir": case "quit": return;
         default: throw new Error("Unexpected command in UI: " + command);
@@ -559,6 +562,42 @@ try {
   await click('[aria-label="Back to tunnels"]');
   await click('[data-tunnel="example-local.test"] .auto-toggle input');
   await check("automation changes preserve host maps and pin settings", "fake.calls.some(c=>c.command==='update_tunnel_settings'&&c.args.settings.hostPortMap['2222']===22&&c.args.settings.pinnedPorts)");
+  const updateReady = structuredClone(fixture);
+  Object.assign(updateReady.update, { status: "ready", version: "0.3.0", notes: "Synthetic release notes." });
+  const updateDownloading = structuredClone(fixture);
+  Object.assign(updateDownloading.update, { status: "downloading", version: "0.3.0", progress: 0.42 });
+  for (const theme of ["light", "dark"]) {
+    await load(theme, updateReady);
+    await check(theme + ": ready update banner warns that both active tunnels stop", "document.querySelector('.update-banner').textContent.includes('0.3.0 is ready')&&document.querySelector('.update-banner').textContent.includes('stops 2 active connections and hosts')&&document.querySelector('.update-banner').textContent.includes('SSH')");
+    await snapshot("update-ready-" + theme);
+    await clickText("Later");
+    await check(theme + ": Later collapses the banner into a footer pill", "!document.querySelector('.update-banner')&&!!document.querySelector('.update-pill')");
+    await snapshot("update-later-" + theme);
+    await click(".update-pill");
+    await check(theme + ": footer pill restores the banner", "!!document.querySelector('.update-banner')");
+    await click('[aria-label="Settings"]');
+    await scrollTo(".update-settings");
+    await check(theme + ": settings offer Restart to update with the version", "document.querySelector('.update-settings').textContent.includes('Version 0.2.0')&&[...document.querySelectorAll('.update-settings button')].some(n=>n.textContent==='Restart to update')");
+    await snapshot("settings-update-ready-" + theme);
+    await load(theme, updateDownloading);
+    await check(theme + ": downloads stay out of the tunnel list", "!document.querySelector('.update-banner')&&!document.querySelector('.update-pill')");
+    await click('[aria-label="Settings"]');
+    await scrollTo(".update-settings");
+    await check(theme + ": settings show download progress", "document.querySelector('.update-settings').textContent.includes('42%')&&!!document.querySelector('.update-progress')");
+    await snapshot("settings-update-downloading-" + theme);
+    await load(theme);
+    await click('[aria-label="Settings"]');
+    await scrollTo(".update-settings");
+    await check(theme + ": settings show the current version and up-to-date state", "document.querySelector('.update-settings').textContent.includes('Version 0.2.0 · Up to date')");
+    await snapshot("settings-updates-" + theme);
+  }
+  await load("light", updateReady);
+  await clickText("Restart to update");
+  await check("Restart to update calls install_update and disables the button", "fake.calls.some(c=>c.command==='install_update')&&[...document.querySelectorAll('.update-banner button')].find(n=>n.textContent==='Restarting…').disabled");
+  await load("light");
+  await click('[aria-label="Settings"]');
+  await clickText("Check for updates");
+  await check("Check for updates calls the backend", "fake.calls.some(c=>c.command==='check_for_updates')");
   const race = structuredClone(fixture); race.simulateSnapshotRace = true;
   await load("light",race);
   await check("initial snapshot cannot overwrite a newer event", "document.querySelector('.tunnel-name').textContent==='Latest snapshot'");

@@ -19,7 +19,14 @@ Guidance for AI agents working on **Tunnel Bar**, a menu-bar/tray app (Tauri 2: 
 - The conductor pushes `main` and publishes GitHub releases **only when the user asks or at agreed milestones**.
 - Identity: GitHub account `svanvliet`, email `782486+svanvliet@users.noreply.github.com`. Never use a work identity.
 - Commits end with `Co-authored-by: Copilot App <223556219+Copilot@users.noreply.github.com>`.
-- Release flow: bump the version in `package.json`, `src-tauri/Cargo.toml` and `src-tauri/tauri.conf.json`. Then run `scripts/package-macos.sh` (universal `.dmg` + `.app.zip`), tag `vX.Y.Z`, and create the GitHub release with `--notes-file`.
+- Release flow:
+  1. Bump the version in `package.json`, `src-tauri/Cargo.toml` and `src-tauri/tauri.conf.json`.
+  2. Write the release notes to a file and run `NOTES_FILE=<notes.md> scripts/package-macos.sh`. It builds universal, signs with `Developer ID Application: Scott Van Vliet (97379Y67S5)` (hardened runtime, no entitlements), notarizes and staples the `.app` and `.dmg` with the `spicewood-notary` notarytool keychain profile, and checks them with `spctl -a -vv` and `stapler validate`.
+  3. Outputs in `dist/`: `.dmg`, `.app.zip`, the updater `Tunnel-Bar_X.Y.Z_universal.app.tar.gz` + `.sig`, `latest.json` (darwin-aarch64 and darwin-x86_64 both point at the universal tarball) and `SHA256SUMS`.
+  4. Tag `vX.Y.Z` and create the GitHub release with `--notes-file`, uploading the dmg, zip, tar.gz, `.sig`, `latest.json` and `SHA256SUMS`. The app reads `https://github.com/svanvliet/tunnel-bar/releases/latest/download/latest.json`, so the newest non-draft, non-prerelease release must carry `latest.json`.
+- Updater signing key: private key at `~/.tauri/tunnelbar-updater.key` (never in the repo); its password is in the login keychain (`security find-generic-password -s tunnelbar-updater-key-password -w`), and the script reads both. Only the public key is in `tauri.conf.json`. `requireSignedVersion` is on, so the signature must be made with `tauri signer sign --app-version X.Y.Z` (the script does this). Losing the key means installed apps can't update. Never print or commit credentials.
+- Windows updater artifacts (not published yet; after PC testing): on the PC, set `TAURI_SIGNING_PRIVATE_KEY` / `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` from the same key, then either build with `bundle.createUpdaterArtifacts: true` (produces the NSIS `-setup.exe` + `.sig`) or sign the setup `.exe` with `npx tauri signer sign --app-version X.Y.Z`. Add `"windows-x86_64": {"signature": <.sig contents>, "url": <release URL of the setup .exe>}` to `latest.json` before uploading. Updates install with NSIS `passive` mode.
+- Testing updates without publishing: build two versions with `ALLOW_TEST_BUILD=1 TUNNELBAR_TEST_PROFILE=updatetest TUNNELBAR_UPDATE_ENDPOINT=http://127.0.0.1:8765/latest.json DOWNLOAD_BASE=http://127.0.0.1:8765 EXTRA_CONFIG='{"version":"0.3.90","identifier":"me.svv.tunnelbar.updatetest","plugins":{"updater":{"dangerousInsecureTransportProtocol":true}}}' scripts/package-macos.sh`. Serve the higher version's `latest.json` and tarball with `python3 -m http.server 8765 --bind 127.0.0.1`, unzip the lower version outside `/Applications`, and `open --env TUNNELBAR_TEST_AUTO_INSTALL=1` it. The test profile keeps its own settings, logs and single-instance socket, so the installed app and its tunnels aren't touched. Delete `~/Library/{Application Support,Logs,WebKit,Caches}/*updatetest*` afterwards.
 
 ## Validation
 
@@ -32,6 +39,8 @@ npx tauri build --bundles app   # -> src-tauri/target/release/bundle/macos/Tunne
 - Live tests run against the real devtunnel service and are `#[ignore]`: `cargo test live_manage -- --ignored --nocapture`. They may only create, modify or delete tunnels named `tunnelbar-test-*`. Never touch the user's other tunnels.
 - **Validate locally; don't spend GitHub Actions minutes.** CI (`.github/workflows/ci.yml`) is manual-only (`workflow_dispatch`). Don't add push or PR triggers, and don't run it unless the user asks.
 - Windows code is checked on the Mac by cross-target clippy (`rustup target add x86_64-pc-windows-msvc`, then `cargo clippy --target x86_64-pc-windows-msvc`). The real Windows build and testing happen on the user's PC.
+  - `tauri-winres` needs `llvm-rc`. If it isn't installed, put a stub on `PATH` that writes an empty file to the path after `/fo` (clippy doesn't link): `PATH=/tmp/rcstub:$PATH cargo clippy -q --all-targets --target x86_64-pc-windows-msvc -- -D warnings`.
+  - The updater uses `native-tls` rather than rustls, because `ring` doesn't cross-compile to MSVC from macOS.
 
 ## Installing a local build (macOS)
 

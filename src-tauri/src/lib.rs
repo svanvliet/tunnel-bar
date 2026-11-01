@@ -15,6 +15,7 @@ mod settings;
 mod ssh;
 mod supervisor;
 mod tray;
+mod updater;
 #[cfg(windows)]
 mod win;
 
@@ -30,6 +31,7 @@ pub fn run() {
         .plugin(tauri_plugin_positioner::init())
         .plugin(tauri_plugin_opener::init())
         .plugin(hotkey::plugin())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(|app| {
             #[cfg(target_os = "macos")]
             app.set_activation_policy(tauri::ActivationPolicy::Accessory);
@@ -49,7 +51,7 @@ pub fn run() {
             }
             let launch = state.settings.lock().unwrap().launch_at_login;
             // Only reconcile autostart in release builds so `tauri dev` doesn't register the debug binary.
-            if !cfg!(debug_assertions) {
+            if !cfg!(debug_assertions) && settings::TEST_PROFILE.is_none() {
                 // Pre-0.3 builds were named "TunnelBar"; drop their login item, which points at the old bundle.
                 #[cfg(target_os = "macos")]
                 if let Some(home) = dirs::home_dir() {
@@ -102,6 +104,7 @@ pub fn run() {
                     h.exit(0);
                 });
             }
+            updater::start(state.clone());
             app::start_background(state);
             Ok(())
         })
@@ -143,6 +146,8 @@ pub fn run() {
             commands::cancel_login,
             commands::logout,
             commands::set_hotkey,
+            commands::check_for_updates,
+            commands::install_update,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application");

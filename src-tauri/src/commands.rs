@@ -320,6 +320,19 @@ pub fn open_url(app: AppHandle, url: String) -> Result<(), String> {
     app.opener().open_url(url, None::<&str>).map_err(|e| e.to_string())
 }
 
+/// Checks now; progress and the result arrive in the snapshot's `update` field.
+#[tauri::command]
+pub async fn check_for_updates(state: State<'_, Shared>) -> Result<(), String> {
+    crate::updater::check(state.inner(), true).await;
+    Ok(())
+}
+
+/// Installs the downloaded update and restarts, stopping every connection and host.
+#[tauri::command]
+pub async fn install_update(state: State<'_, Shared>) -> Result<(), String> {
+    crate::updater::install(state.inner()).await
+}
+
 #[tauri::command]
 pub fn quit(app: AppHandle) {
     crate::tray::quit(&app);

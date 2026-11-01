@@ -235,6 +235,26 @@
     await setLabelFilter(current.some((item) => item.toLowerCase() === label.toLowerCase()) ? current.filter((item) => item.toLowerCase() !== label.toLowerCase()) : [...current, label]);
   }
   async function openLogFolder() { await command("open_log_dir", undefined, "Couldn’t open logs folder", "folder"); }
+  let updateLater = $state<string | null>(null);
+  const update = $derived(snap?.update);
+  const updateReady = $derived(update?.status === "ready" || update?.status === "installing");
+  const activeCount = $derived(snap?.tunnels.filter((t) => t.state.kind !== "disconnected" || t.hostState.kind !== "disconnected").length ?? 0);
+  const restartWarning = $derived(activeCount
+    ? `Restarting stops ${activeCount === 1 ? "1 active connection or host" : activeCount + " active connections and hosts"}, so open SSH sessions will drop. They come back automatically after the update.`
+    : "Tunnel Bar restarts in a few seconds.");
+  function updateStatusText(u: NonNullable<typeof update>) {
+    switch (u.status) {
+      case "checking": return "Checking for updates…";
+      case "downloading": return `Downloading ${u.version ?? "update"}… ${Math.round((u.progress ?? 0) * 100)}%`;
+      case "ready": return `Version ${u.version} is ready to install`;
+      case "installing": return `Installing ${u.version}…`;
+      case "upToDate": return "Up to date" + (u.lastChecked ? " · checked " + ago(u.lastChecked) : "");
+      case "error": return u.error ?? "Couldn’t check for updates";
+      default: return u.enabled ? "Checks automatically every few hours" : "Updates are off in development builds";
+    }
+  }
+  async function checkForUpdates() { await command("check_for_updates", undefined, "Couldn’t check for updates", "update"); }
+  async function installUpdate() { await command("install_update", undefined, "Couldn’t install the update", "update"); }
   async function quit() { await command("quit", undefined, "Couldn’t quit Tunnel Bar", "quit"); }
 
   async function openLogs(t: TunnelView) {
@@ -309,6 +329,10 @@
         <div class="empty-state"><Icon name="lock" size={32} /><h2>Sign in to Dev Tunnels</h2><p>Use your Microsoft or GitHub account to view and manage your tunnels.</p>
           <LoginPanel login={snap.login} loggedIn={false} {account} busy={busy.includes("login")} onStart={startLogin} onCancel={cancelLogin} onLogout={logout} onFallback={openLogin} onCopy={(code) => clipboard(code, "Code copied", "Sign-in device code", "login-code")} onOpen={openUrl} />
         </div>
+      {/if}
+      {#if updateReady && update && updateLater !== update.version}
+        <div class="banner update-banner" role="status"><Icon name="download" /><div><strong>Tunnel Bar {update.version} is ready</strong><p>{restartWarning}</p>{#if update.error}<p class="error-text selectable">{update.error}</p>{/if}
+          <div class="button-row"><button class="primary" disabled={update.status === "installing" || busy.includes("update")} onclick={installUpdate}>{update.status === "installing" ? "Restarting…" : "Restart to update"}</button><button class="quiet" disabled={update.status === "installing"} onclick={() => (updateLater = update.version ?? null)}>Later</button></div></div></div>
       {/if}
       {#if snap?.adminDevtunnel}<div class="banner warning"><Icon name="warning" /><div><strong>devtunnel is running as administrator</strong><p>Tunnel Bar can’t tell which tunnel it serves. Stop it in that terminal to manage it here.</p></div></div>{/if}
       {#if snap?.refreshError}<div class="banner warning"><Icon name="warning" /><div><strong>Couldn’t refresh tunnels</strong><p class="selectable">{snap.refreshError}</p><button class="quiet" disabled={snap.refreshing} onclick={refresh}>Retry refresh</button></div></div>{/if}
@@ -400,6 +424,16 @@
           <strong class="field-title">Account</strong>
           <LoginPanel login={snap.login} loggedIn={!!snap.auth?.loggedIn} {account} busy={!snap.cliPath || busy.includes("login")} onStart={startLogin} onCancel={cancelLogin} onLogout={logout} onFallback={openLogin} onCopy={(code) => clipboard(code, "Code copied", "Sign-in device code", "login-code")} onOpen={openUrl} />
         </div>
+        {#if update}
+          <div class="settings-group update-settings">
+            <div class="settings-row"><div><strong>Updates</strong><p class="field-hint" class:error-text={update.status === "error"} role={update.status === "error" ? "alert" : undefined}>Version {update.currentVersion} · {updateStatusText(update)}</p></div>
+              {#if updateReady}<button class="primary" disabled={update.status === "installing" || busy.includes("update")} onclick={installUpdate}>{update.status === "installing" ? "Restarting…" : "Restart to update"}</button>
+              {:else}<button class="quiet" disabled={!update.enabled || ["checking", "downloading"].includes(update.status) || busy.includes("update")} onclick={checkForUpdates}>Check for updates</button>{/if}
+            </div>
+            {#if updateReady}<p class="field-hint">{restartWarning}</p>{/if}
+            {#if update.status === "downloading"}<progress class="update-progress" max="1" value={update.progress ?? 0} aria-label="Update download progress"></progress>{/if}
+          </div>
+        {/if}
         <div class="settings-group settings-row"><div><strong>Logs</strong><p class="field-hint selectable">{snap.logDir}</p></div><button class="quiet" disabled={busy.includes("folder")} onclick={openLogFolder}>Open folder</button></div>
       {:else}<p class="hint">Settings are unavailable until the initial snapshot loads.</p>{/if}
     </section>
@@ -411,7 +445,7 @@
     </div>
   {/if}
   <footer class="app-footer">
-    {#if view === "list"}<span>Updated {ago(snap?.lastRefresh)}</span><span class="spacer"></span><button class="quiet" onclick={quit}>Quit</button>
+    {#if view === "list"}<span>Updated {ago(snap?.lastRefresh)}</span><span class="spacer"></span>{#if updateReady && update && updateLater === update.version}<button class="quiet update-pill" onclick={() => (updateLater = null)}><Icon name="download" size={12} />Update ready</button>{/if}<button class="quiet" onclick={quit}>Quit</button>
     {:else if view === "expose"}<span class="spacer"></span><button class="quiet" disabled={busy.includes("expose")} onclick={back}>Cancel</button><button class="primary" form="expose-form" disabled={!ready || busy.includes("expose") || !exposePort}>{busy.includes("expose") ? "Creating…" : "Expose"}</button>
     {:else if view === "logs"}<button class="quiet" disabled={busy.includes("logs")} onclick={clearLogs}>Clear</button><button class="quiet" onclick={() => clipboard(logs.map((line) => `${line.ts} ${line.text}`).join("\n"), "Logs copied", logTunnel?.displayName ?? logId ?? "", "logs")}>Copy</button><span class="spacer"></span><button class="quiet" onclick={openLogFolder}>Open folder</button>
     {:else}<span>Tunnel Bar {appVersion}</span><span class="spacer"></span><button class="quiet" onclick={quit}>Quit Tunnel Bar</button>{/if}
@@ -552,6 +586,12 @@
   .loading-state > div { height: 92px; border: 1px solid var(--line); background: var(--soft); border-radius: 10px; }
   .banner { display: flex; align-items: flex-start; gap: 8px; font-size: 12px; padding: 10px; border-radius: 7px; margin-bottom: 10px; }
   .banner p { margin: 6px 0; overflow-wrap: anywhere; }
+  .update-banner { background: var(--wash); border: 1px solid color-mix(in srgb, var(--accent) 35%, transparent); }
+  .update-banner > :global(svg) { color: var(--accent); flex: none; }
+  .update-banner > div { flex: 1; min-width: 0; }
+  .update-banner .button-row { margin-top: 8px; }
+  .update-pill { color: var(--accent); gap: 4px; }
+  .update-progress { width: 100%; height: 4px; margin-top: 8px; accent-color: var(--accent); }
   .refreshing { animation: rotate 1s linear infinite; }
   :global(.copy-check path) { stroke-dasharray: 24; animation: confirm-copy 160ms ease-out; }
   @keyframes confirm-copy { from { stroke-dashoffset: 24; } to { stroke-dashoffset: 0; } }

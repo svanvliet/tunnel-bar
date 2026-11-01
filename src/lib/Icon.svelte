@@ -1,5 +1,5 @@
 <script lang="ts">
-  export type IconName = "plus" | "refresh" | "settings" | "more" | "copy" | "terminal" | "arrow" | "back" | "lock" | "globe" | "warning" | "laptop" | "server" | "inspect" | "check" | "close";
+  export type IconName = "plus" | "refresh" | "settings" | "more" | "copy" | "terminal" | "arrow" | "back" | "lock" | "globe" | "warning" | "laptop" | "server" | "inspect" | "check" | "close" | "download";
   let { name, size = 16 }: { name: IconName; size?: number } = $props();
   const paths: Record<IconName, string> = {
     plus: "M12 5v14M5 12h14",
@@ -18,6 +18,7 @@
     inspect: "M16 10a6 6 0 1 1-12 0 6 6 0 0 1 12 0Zm-1 5 6 6",
     check: "m5 12 4 4L19 6",
     close: "m6 6 12 12M18 6 6 18",
+    download: "M12 4v11m-5-5 5 5 5-5M5 20h14",
   };
 </script>
 

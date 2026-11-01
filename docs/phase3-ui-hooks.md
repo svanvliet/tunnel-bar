@@ -126,6 +126,13 @@ By default the service rewrites `Host` to `localhost` and `Origin` to `http(s):/
 
 `open_login` (open Terminal) is unchanged. Keep it as a fallback.
 
+### Updates
+
+| Command | Args | Returns | Notes |
+|---|---|---|---|
+| `check_for_updates` | — | — | Manual check. Downloads a newer version in the background; progress and errors appear in `Snapshot.update`. |
+| `install_update` | — | — | Installs the downloaded update and restarts. Stops every connection and host; the ones that were running come back after the restart. Errors return a message and `status` goes back to `ready`. |
+
 ## New fields
 
 **`TunnelView`**
@@ -161,6 +168,7 @@ By default the service rewrites `Host` to `localhost` and `Origin` to `http(s):/
   - `{kind:"succeeded", message}`
   - `{kind:"failed", message}`
 - `hotkeyError: string | null`: set when the startup registration failed, for example because another app owns the shortcut.
+- `update: UpdateState`: `{status, currentVersion, enabled, version, notes, progress, lastChecked, error}`. `status` is one of `idle`, `checking`, `upToDate`, `downloading`, `ready`, `installing` or `error`. `enabled` is false in development builds. Background check failures are only logged; `error` is set for manual checks and failed installs.
 
 ## UI notes
 

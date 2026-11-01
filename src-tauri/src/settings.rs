@@ -3,16 +3,27 @@ use std::path::PathBuf;
 
 pub const APP_ID: &str = "me.svv.tunnelbar";
 
+/// Build-time profile for throwaway test builds (e.g. the local update test). It gives them their own
+/// settings, logs and child-process records so they never reclaim or kill the installed app's tunnels.
+pub const TEST_PROFILE: Option<&str> = option_env!("TUNNELBAR_TEST_PROFILE");
+
+fn profiled(name: &str) -> String {
+    match TEST_PROFILE {
+        Some(p) => format!("{name}.{p}"),
+        None => name.to_string(),
+    }
+}
+
 pub fn config_dir() -> PathBuf {
-    dirs::config_dir().unwrap_or_else(std::env::temp_dir).join(APP_ID)
+    dirs::config_dir().unwrap_or_else(std::env::temp_dir).join(profiled(APP_ID))
 }
 
 pub fn log_dir() -> PathBuf {
     #[cfg(target_os = "macos")]
     if let Some(home) = dirs::home_dir() {
-        return home.join("Library/Logs/TunnelBar");
+        return home.join("Library/Logs").join(profiled("TunnelBar"));
     }
-    dirs::data_local_dir().unwrap_or_else(std::env::temp_dir).join("TunnelBar").join("logs")
+    dirs::data_local_dir().unwrap_or_else(std::env::temp_dir).join(profiled("TunnelBar")).join("logs")
 }
 
 pub fn pidfile_path() -> PathBuf {
@@ -21,6 +32,11 @@ pub fn pidfile_path() -> PathBuf {
 
 pub fn hosts_pidfile_path() -> PathBuf {
     config_dir().join("hosts.json")
+}
+
+/// Connections to restore after restarting to install an update.
+pub fn resume_path() -> PathBuf {
+    config_dir().join("resume.json")
 }
 
 fn settings_path() -> PathBuf {

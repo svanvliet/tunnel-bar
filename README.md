@@ -78,6 +78,19 @@ See [docs/phase3-ui-hooks.md](docs/phase3-ui-hooks.md) for the commands and fiel
   <img src="docs/screenshots/sign-in-device-code-light.png" width="400" alt="Device-code sign-in with Copy code, Open sign-in page and Cancel sign-in controls">
 </picture>
 
+### Updates
+
+Tunnel Bar checks GitHub Releases at launch and every few hours, downloads a new version in the background and verifies its signature. It never restarts on its own: when the update is ready, a banner explains that restarting drops active connections and hosts, such as open SSH sessions. Choose **Restart to update** or **Later**; Later leaves an "Update ready" pill in the footer. Connections and hosts that were running, plus auto-connect and auto-host tunnels, come back after the restart. Settings shows the current version and a **Check for updates** button. Development builds don't update.
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/screenshots/update-ready-dark.png">
+  <img src="docs/screenshots/update-ready-light.png" width="400" alt="Banner saying Tunnel Bar 0.3.0 is ready, warning that restarting stops two active connections, with Restart to update and Later buttons">
+</picture>
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/screenshots/settings-update-ready-dark.png">
+  <img src="docs/screenshots/settings-update-ready-light.png" width="400" alt="Settings Updates group showing the current version, a ready update and a Restart to update button">
+</picture>
+
 ### Logs
 
 Follow per-tunnel live logs from tunnel details, with timestamps, highlighted errors, Copy and Clear controls. Open the saved logs folder from the viewer or Settings: `~/Library/Logs/TunnelBar/` on macOS, `%LOCALAPPDATA%\TunnelBar\logs` on Windows.
@@ -112,11 +125,7 @@ The tray flyout shares the same connection, hosting and management controls, wit
 
 ## Install
 
-Download the DMG from [Releases](https://github.com/svanvliet/tunnel-bar/releases) and drag Tunnel Bar to Applications. Builds are ad-hoc signed (not notarized yet), so clear the quarantine flag before first launch:
-
-```sh
-xattr -dr com.apple.quarantine "/Applications/Tunnel Bar.app"
-```
+Download the DMG from [Releases](https://github.com/svanvliet/tunnel-bar/releases) and drag Tunnel Bar to Applications. macOS builds are signed with a Developer ID and notarized, so they open without Gatekeeper warnings. After that, Tunnel Bar updates itself (see [Updates](#updates)).
 
 On Windows, run the `Tunnel Bar_<version>_x64-setup.exe` (per-user NSIS) or `.msi` installer. Builds aren't code-signed yet, so SmartScreen may ask you to confirm. The manual (`workflow_dispatch`) CI `windows` job uploads both as the `tunnel-bar-windows` artifact.
 
@@ -127,8 +136,10 @@ npm ci
 npm run tauri dev     # development
 npm run tauri build   # release .app in src-tauri/target/release/bundle/macos
 codesign --force --deep -s - src-tauri/target/release/"bundle/macos/Tunnel Bar.app"   # ad-hoc sign
-./scripts/package-macos.sh   # universal DMG + zip in dist/
+./scripts/package-macos.sh   # signed + notarized universal DMG, zip, updater tarball and latest.json in dist/
 ```
+
+`package-macos.sh` needs the Developer ID certificate, a `notarytool` keychain profile and the updater signing key; see `AGENTS.md` for the release flow. `SKIP_NOTARIZE=1` skips notarization for local packaging.
 
 On Windows, `npm run tauri build` produces NSIS and MSI installers in `src-tauri/target/release/bundle/{nsis,msi}` (see `src-tauri/tauri.windows.conf.json`).
 
@@ -169,6 +180,9 @@ cd .. && npm run check
 | `TUNNELBAR_PIN=1` | keep the popover open when it loses focus |
 | `TUNNELBAR_LIVE_TUNNEL` | tunnel id for the ignored live integration test |
 | `TUNNELBAR_LIVE_HOST` | tunnel id for the ignored live hosting test |
+| `TUNNELBAR_UPDATE_ENDPOINT` | (build time) replace the update endpoint; also enables updates in debug builds. Test builds only |
+| `TUNNELBAR_TEST_PROFILE` | (build time) separate settings, logs and pidfiles (`me.svv.tunnelbar.<name>`, `TunnelBar.<name>`) and skip launch-at-login, so a test build runs beside the installed app |
+| `TUNNELBAR_TEST_AUTO_INSTALL=1` | (runtime, test-profile builds only) install and restart as soon as an update is downloaded |
 
 ## Roadmap
 
@@ -176,4 +190,4 @@ cd .. && npm run check
 2. ~~Phase 2 – hosting (`devtunnel host`) from the menu bar~~ (v0.2.0)
 3. Phase 3 – tunnel management (create, delete, ports, labels, expiration, sign-in, stable ports, hotkey, label filter)
 4. Phase 4 – Windows tray version: builds and runs on a PC; fixes in progress
-5. Phase 5 – signed/notarized DMG, auto-update, CI releases
+5. Phase 5 – ~~signed/notarized DMG, auto-update~~, CI releases

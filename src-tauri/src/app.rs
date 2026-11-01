@@ -57,6 +57,24 @@ pub struct AppState {
     /// When a host on this device was last seen per tunnel (feeds `Settings.hosted_here`).
     local_host_seen: Mutex<HashMap<String, Instant>>,
     started: Instant,
+    pub updates: crate::updater::Updates,
+}
+
+/// Connections and hosts that were running when the app restarted to install an update.
+#[derive(Debug, Default, serde::Serialize, serde::Deserialize, PartialEq)]
+pub struct Resume {
+    pub saved_at: i64,
+    pub connect: Vec<String>,
+    pub host: Vec<String>,
+}
+
+/// A resume file older than this is from a restart that never happened; ignore it.
+const RESUME_MAX_AGE_SECS: i64 = 15 * 60;
+
+pub fn take_resume(path: &Path, now: i64) -> Resume {
+    let r = std::fs::read(path).ok().and_then(|b| serde_json::from_slice::<Resume>(&b).ok());
+    let _ = std::fs::remove_file(path);
+    r.filter(|r| (0..=RESUME_MAX_AGE_SECS).contains(&(now - r.saved_at))).unwrap_or_default()
 }
 
 /// Why a delete must be refused, given what the caller acknowledged.
@@ -131,6 +149,7 @@ impl AppState {
                 admin_devtunnel: Mutex::new(false),
                 local_host_seen: Mutex::new(HashMap::new()),
                 started: Instant::now(),
+                updates: Default::default(),
                 supervisor,
                 hoster: Supervisor::with_role(Role::Host, logs.clone(), listener)
                     .with_pidfile(settings::hosts_pidfile_path()),
@@ -252,6 +271,7 @@ impl AppState {
             login: self.login.lock().unwrap().clone(),
             hotkey_error: self.hotkey_error.lock().unwrap().clone(),
             admin_devtunnel: *self.admin_devtunnel.lock().unwrap(),
+            update: self.updates.view(&self.app.package_info().version.to_string()),
             cli_path: cache.cli.as_ref().map(|p| p.display().to_string()),
             cli_version: cache.cli_version.clone(),
             auth: cache.auth.clone(),
@@ -1383,6 +1403,42 @@ impl AppState {
         }
     }
 
+    /// Records running connections and hosts so the next launch restores them after an update restart.
+    pub fn save_resume(&self) {
+        let active = |s: &Supervisor| s.managed_ids().into_iter().filter(|id| s.is_active(id)).collect::<Vec<_>>();
+        let r = Resume { saved_at: chrono::Utc::now().timestamp(), connect: active(&self.supervisor), host: active(&self.hoster) };
+        let path = settings::resume_path();
+        let written = serde_json::to_vec(&r).map_err(|e| e.to_string()).and_then(|b| {
+            if let Some(dir) = path.parent() {
+                std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+            }
+            std::fs::write(&path, b).map_err(|e| e.to_string())
+        });
+        if let Err(e) = written {
+            self.logs.push("_app", "app", &format!("Couldn't save connections to restore after the update: {e}"));
+        }
+    }
+
+    /// Restarts what was running before an update restart (auto-connect/auto-host tunnels are handled separately).
+    async fn resume_after_update(self: &Arc<Self>) {
+        let r = take_resume(&settings::resume_path(), chrono::Utc::now().timestamp());
+        for id in r.connect {
+            if !self.supervisor.is_active(&id) && self.external_pid(&id).is_none() {
+                self.logs.push(&id, "app", "Reconnecting after update");
+                let _ = self.connect(&id).await;
+            }
+        }
+        for id in r.host {
+            if self.hoster.is_active(&id) {
+                continue;
+            }
+            self.logs.push(&id, "app", "Hosting again after update");
+            if let Err(e) = self.host(&id).await {
+                self.logs.push(&id, "app", &format!("Couldn't host after update: {e}"));
+            }
+        }
+    }
+
     pub fn save_settings(&self) -> Result<(), String> {
         settings::save(&self.settings.lock().unwrap())
     }
@@ -1420,6 +1476,7 @@ pub fn start_background(state: Shared) {
             }
         }
         state.auto_connect().await;
+        state.resume_after_update().await;
         let mut last_wall = chrono::Local::now();
         let mut ticks: u64 = 0;
         loop {
@@ -1555,6 +1612,20 @@ mod tests {
         assert!(next_hosted_here(true, false, true, true, long));
         // Never-hosted tunnels stay unremembered.
         assert!(!next_hosted_here(false, false, true, false, long));
+    }
+
+    #[test]
+    fn resume_is_taken_once_and_expires() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("resume.json");
+        let r = Resume { saved_at: 1_000, connect: vec!["devbox-ssh.usw3".into()], host: vec!["preview-web.usw3".into()] };
+        std::fs::write(&p, serde_json::to_vec(&r).unwrap()).unwrap();
+        assert_eq!(take_resume(&p, 1_060), r);
+        assert!(!p.exists());
+        assert_eq!(take_resume(&p, 1_060), Resume::default());
+        std::fs::write(&p, serde_json::to_vec(&r).unwrap()).unwrap();
+        assert_eq!(take_resume(&p, 1_000 + RESUME_MAX_AGE_SECS + 1), Resume::default());
+        assert!(!p.exists());
     }
 
     fn pf(created_by_app: bool, hosted_elsewhere: bool) -> DeletePreflight {

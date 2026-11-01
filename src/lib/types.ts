@@ -84,6 +84,20 @@ export interface Snapshot {
   login?: LoginState | null;
   hotkeyError?: string | null;
   adminDevtunnel?: boolean;
+  /** Self-update state. Change via `check_for_updates` / `install_update`. */
+  update?: UpdateState;
+}
+
+export type UpdateStatus = "idle" | "checking" | "upToDate" | "downloading" | "ready" | "installing" | "error";
+export interface UpdateState {
+  status: UpdateStatus; currentVersion: string;
+  /** False in development builds, which never update. */
+  enabled: boolean;
+  /** Version being downloaded or ready to install. */
+  version?: string | null; notes?: string | null;
+  /** Download progress 0–1 while `downloading`. */
+  progress?: number | null;
+  lastChecked?: string | null; error?: string | null;
 }
 
 /** `port` is the local server port; `remotePort` (optional) the tunnel port to advertise instead. */

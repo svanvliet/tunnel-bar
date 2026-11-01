@@ -1,6 +1,6 @@
 use crate::app::{self, AppState};
 use crate::icon::{self, TrayState};
-use crate::model::{ConnState, Snapshot};
+use crate::model::{ConnState, Snapshot, UpdateStatus};
 use std::sync::Mutex;
 use tauri::image::Image;
 use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
@@ -67,11 +67,20 @@ fn state_label(s: &ConnState) -> String {
 }
 
 fn menu_signature(snap: &Snapshot) -> String {
-    snap.tunnels
+    let mut sig = snap
+        .tunnels
         .iter()
         .map(|t| format!("{}|{}|{}|{:?}|{}", t.id, t.display_name, state_label(&t.state), t.forwards, state_label(&t.host_state)))
         .collect::<Vec<_>>()
-        .join(";")
+        .join(";");
+    if let Some(v) = ready_update(snap) {
+        sig.push_str(&format!(";update:{v}"));
+    }
+    sig
+}
+
+fn ready_update(snap: &Snapshot) -> Option<&str> {
+    (snap.update.status == UpdateStatus::Ready).then_some(snap.update.version.as_deref()).flatten()
 }
 
 pub fn update(app: &AppHandle, snap: &Snapshot) {
@@ -128,6 +137,10 @@ fn build_menu<R: Runtime>(app: &AppHandle<R>, snap: &Snapshot) -> tauri::Result<
         menu.append(&MenuItem::with_id(app, format!("{action}:{}", t.id), label, enabled, None::<&str>)?)?;
     }
     menu.append(&PredefinedMenuItem::separator(app)?)?;
+    if let Some(v) = ready_update(snap) {
+        // Opens the popover, which explains that restarting drops active connections.
+        menu.append(&MenuItem::with_id(app, "update", format!("Update to {v} Ready…"), true, None::<&str>)?)?;
+    }
     menu.append(&MenuItem::with_id(app, "open", "Open Tunnel Bar…", true, None::<&str>)?)?;
     menu.append(&MenuItem::with_id(app, "refresh", "Refresh", true, None::<&str>)?)?;
     menu.append(&PredefinedMenuItem::separator(app)?)?;
@@ -138,7 +151,7 @@ fn build_menu<R: Runtime>(app: &AppHandle<R>, snap: &Snapshot) -> tauri::Result<
 fn handle_menu(app: &AppHandle, id: &str) {
     let st = app::state(app);
     match id {
-        "open" => show_window(app),
+        "open" | "update" => show_window(app),
         "refresh" => {
             tauri::async_runtime::spawn(async move { st.refresh().await });
         }

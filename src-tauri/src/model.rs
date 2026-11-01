@@ -526,6 +526,40 @@ pub struct Snapshot {
     pub hotkey_error: Option<String>,
     /// devtunnel is running as administrator and Tunnel Bar can't tell which tunnel it serves.
     pub admin_devtunnel: bool,
+    pub update: UpdateState,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "camelCase")]
+pub enum UpdateStatus {
+    /// No check has finished yet (or updates are unavailable in this build).
+    #[default]
+    Idle,
+    Checking,
+    UpToDate,
+    Downloading,
+    /// Downloaded and verified; restarting installs it.
+    Ready,
+    Installing,
+    /// The last manual check failed (background failures are only logged).
+    Error,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateState {
+    pub status: UpdateStatus,
+    pub current_version: String,
+    /// False in development builds, which never check for updates.
+    pub enabled: bool,
+    /// Version being downloaded or ready to install.
+    pub version: Option<String>,
+    pub notes: Option<String>,
+    /// Download progress, 0.0-1.0, when the size is known.
+    pub progress: Option<f64>,
+    /// RFC 3339 time of the last check that reached the update server.
+    pub last_checked: Option<String>,
+    pub error: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
