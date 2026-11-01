@@ -98,6 +98,8 @@ fn wildcard_conflict(local: u16) -> Option<SocketAddr> {
     wildcards.into_iter().find(|&addr| {
         let sock = if addr.is_ipv4() { TcpSocket::new_v4() } else { TcpSocket::new_v6() };
         let Ok(sock) = sock else { return false };
+        // On Windows SO_REUSEADDR lets a bind steal a port that is already listening, hiding the conflict.
+        #[cfg(not(windows))]
         let _ = sock.set_reuseaddr(true);
         matches!(sock.bind(addr), Err(e) if e.kind() == std::io::ErrorKind::AddrInUse)
     })
@@ -270,8 +272,9 @@ mod tests {
             wait(|| pins.view("t", 22, port).error.is_some());
             let v = pins.view("t", 22, port);
             assert!(!v.listening && v.error.as_deref().unwrap().contains("another server"), "{any}: {v:?}");
-            // localhost:port still reaches the original server.
-            let _c = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
+            // localhost:port still reaches the original server (Windows [::] listeners are IPv6-only).
+            let lo = if any.starts_with('[') { "::1" } else { "127.0.0.1" };
+            let _c = std::net::TcpStream::connect((lo, port)).unwrap();
             server.set_nonblocking(false).unwrap();
             assert!(server.accept().is_ok(), "{any}");
             pins.stop_all();
