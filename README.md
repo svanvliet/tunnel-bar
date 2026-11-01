@@ -127,7 +127,7 @@ The tray flyout shares the same connection, hosting and management controls, wit
 
 Download the DMG from [Releases](https://github.com/svanvliet/tunnel-bar/releases) and drag Tunnel Bar to Applications. macOS builds are signed with a Developer ID and notarized, so they open without Gatekeeper warnings. After that, Tunnel Bar updates itself (see [Updates](#updates)).
 
-On Windows, run the `Tunnel Bar_<version>_x64-setup.exe` (per-user NSIS) or `.msi` installer. Builds aren't code-signed yet, so SmartScreen may ask you to confirm. The manual (`workflow_dispatch`) CI `windows` job uploads both as the `tunnel-bar-windows` artifact.
+On Windows, download `Tunnel-Bar_<version>_x64-setup.exe` (per-user NSIS) or the `.msi` installer from [Releases](https://github.com/svanvliet/tunnel-bar/releases) and run it. Builds aren't code-signed yet, so SmartScreen may ask you to confirm. Windows doesn't auto-update yet; install new versions from Releases. The manual (`workflow_dispatch`) CI `windows` job uploads both as the `tunnel-bar-windows` artifact.
 
 ## Build
 
