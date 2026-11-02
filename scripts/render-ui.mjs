@@ -15,6 +15,7 @@ const checks = [];
 const fixture = {
   cliPath: "/example/bin/devtunnel", cliVersion: "1.0.0", refreshing: false,
   auth: { loggedIn: true, message: "Logged in as developer@example.com using Microsoft." },
+  authState: { kind: "signedIn" }, tunnelsLoaded: true,
   lastRefresh: new Date().toISOString(), refreshError: null, logDir: "/example/logs/TunnelBar",
   settings: { cliPath: null, launchAtLogin: true, notifications: true, firstRunDone: true, tunnels: {}, hotkey: "CmdOrCtrl+Alt+Shift+T", labelFilter: [] },
   allLabels: ["development", "preview", "tunnelbar"], login: null, hotkeyError: null,
@@ -155,9 +156,9 @@ function installFakeIPC(initial) {
           if (args.hotkey && !args.hotkey.includes("+")) throw "A modifier is required.";
           fake.snapshot.settings.hotkey=args.hotkey; fake.snapshot.hotkeyError=null; fake.publish(); return;
         case "set_label_filter": fake.snapshot.settings.labelFilter=args.labels; for(const tunnel of fake.snapshot.tunnels) tunnel.matchesFilter=!args.labels.length||tunnel.summary.labels.some(label=>args.labels.some(filter=>filter.toLowerCase()===label.toLowerCase())); fake.publish(); return;
-        case "start_login": fake.snapshot.login=args.deviceCode?{kind:"deviceCode",provider:args.provider,url:"https://login.example.invalid/device",code:"ABCD-EFGH"}:{kind:"running",provider:args.provider}; fake.publish(); return;
+        case "start_login": fake.snapshot.login=args.deviceCode?{kind:"deviceCode",provider:args.provider,url:"https://login.example.invalid/device",code:"ABCD-EFGH",expiresAt:new Date(Date.now()+14*60_000+32_000).toISOString()}:{kind:"running",provider:args.provider}; fake.publish(); return;
         case "cancel_login": fake.snapshot.login=null; fake.publish(); return;
-        case "logout": fake.snapshot.auth.loggedIn=false; fake.snapshot.tunnels=[]; fake.snapshot.login=null; fake.publish(); return;
+        case "logout": fake.snapshot.auth.loggedIn=false; fake.snapshot.authState={kind:"signedOut"}; fake.snapshot.tunnelsLoaded=false; fake.snapshot.tunnels=[]; fake.snapshot.login=null; fake.publish(); return;
         case "set_anonymous": t.anonymous = args.allow; fake.publish(); return;
         case "delete_tunnel": fake.snapshot.tunnels = fake.snapshot.tunnels.filter((tunnel) => tunnel.id !== args.id); fake.publish(); return;
         case "host": t.hostState = { kind: "connecting" }; fake.publish(); return;
@@ -239,6 +240,25 @@ try {
     assert.equal(await evaluate(expression), true, description);
     checks.push(description);
   }
+  /** Every block in the auth/empty column (buttons, notices, cards) shares left/right edges and is centered in the panel. */
+  async function checkAligned(name) {
+    const result = await evaluate(`(() => {
+      const main = document.querySelector('main').getBoundingClientRect();
+      const blocks = [...document.querySelectorAll('.auth-column > *:not(.auth-links):not(.auth-note), .auth-stack > button, .auth-pair')].filter(n => n.getClientRects().length);
+      if (!blocks.length) return 'no blocks';
+      const r = blocks.map(n => n.getBoundingClientRect()), l = r[0].left, rt = r[0].right;
+      const bad = blocks.filter((n, i) => Math.abs(r[i].left - l) > 1 || Math.abs(r[i].right - rt) > 1);
+      if (bad.length) return 'misaligned: ' + bad.map(n => n.className || n.tagName).join(', ') + ' ' + JSON.stringify(r.map(x => [x.left, x.right]));
+      const pair = document.querySelector('.auth-pair'); if (pair) { const [a, b] = [...pair.children].map(n => n.getBoundingClientRect()); if (Math.abs(a.width - b.width) > 1 || Math.abs(a.height - b.height) > 1) return 'unbalanced pair'; if (Math.abs(a.left - l) > 1 || Math.abs(b.right - rt) > 1) return 'pair does not fill column'; }
+      const heights = [...document.querySelectorAll('.auth-stack > button, .auth-pair > button')].filter(n => n.getClientRects().length).map(n => Math.round(n.getBoundingClientRect().height));
+      if (new Set(heights).size > 1) return 'button heights differ: ' + heights;
+      const overflow = [...document.querySelectorAll('.auth-column button')].find(n => n.scrollWidth > n.clientWidth + 1); if (overflow) return 'button text overflows: ' + overflow.textContent;
+      const centre = (main.left + main.right) / 2; if (Math.abs((l + rt) / 2 - centre) > 1) return 'not centered: ' + ((l + rt) / 2) + ' vs ' + centre;
+      return true;
+    })()`);
+    assert.equal(result, true, name + ": aligned column");
+    checks.push(name + ": column blocks share edges and are centered");
+  }
   async function clickText(text, selector = "button") {
     await evaluate(`(() => { const node = [...document.querySelectorAll(${JSON.stringify(selector)})].find(node => node.getClientRects().length && node.textContent.trim() === ${JSON.stringify(text)}); if (!node) throw new Error('Missing visible control: ' + ${JSON.stringify(text)}); if(node.disabled) throw new Error('Disabled control: '+${JSON.stringify(text)}); node.click(); })()`);
     await settle();
@@ -255,16 +275,17 @@ try {
     await writeFile(path.join(output, name + ".png"), Buffer.from(data, "base64"));
   }
   await call("Page.enable");
+  await call("Emulation.setFocusEmulationEnabled", { enabled: true });
   await call("Emulation.setDeviceMetricsOverride", { width: 400, height: 580, deviceScaleFactor: 2, mobile: false });
   let injection;
   async function load(theme, data = fixture, platform = "MacIntel", reduce = false) {
     if (injection) await call("Page.removeScriptToEvaluateOnNewDocument", { identifier: injection });
-    const init = await call("Page.addScriptToEvaluateOnNewDocument", { source: `Object.defineProperty(navigator,'platform',{value:${JSON.stringify(platform)}});(${installFakeIPC.toString()})(${JSON.stringify({ ...data, lastRefresh: new Date().toISOString() })});` });
+    const init = await call("Page.addScriptToEvaluateOnNewDocument", { source: `Object.defineProperty(navigator,'platform',{value:${JSON.stringify(platform)}});(${installFakeIPC.toString()})(${JSON.stringify({ ...data, lastRefresh: data.lastRefresh === null ? null : new Date().toISOString() })});` });
     injection = init.identifier;
     await call("Emulation.setEmulatedMedia", { features: [{ name: "prefers-color-scheme", value: theme }, { name: "prefers-reduced-motion", value: reduce ? "reduce" : "no-preference" }] });
     await call("Page.navigate", { url });
     for (let attempt = 0; attempt < 60; attempt++) {
-      if (await evaluate("!!document.querySelector('main .section-heading, main .empty-state, main [role=alert]')")) { await settle(); return; }
+      if (await evaluate("!!document.querySelector('main .section-heading, main .empty-state, main .auth-screen, main .skeleton-list, main [role=alert]')")) { await settle(); await evaluate("Promise.all(document.getAnimations().filter(a=>a.effect?.getTiming().iterations!==Infinity).map(a=>a.finished.catch(()=>{})))"); return; }
       await new Promise((resolve) => setTimeout(resolve, 50));
     }
     throw new Error("Frontend did not initialize");
@@ -362,15 +383,85 @@ try {
   await clickText("Take over");
   await check("external takeover calls current backend", "fake.calls.some(c=>c.command==='adopt_external'&&c.args.id==='example-ssh.test')");
   for (const theme of ["light", "dark"]) { await load(theme, fixture, "Win32"); await snapshot("windows-main-" + theme); }
-  const missing = structuredClone(fixture); missing.cliPath = null; missing.tunnels = [];
-  await load("light", missing);
-  await check("missing CLI has explicit recovery", "document.querySelector('.empty-state').textContent.includes('CLI not found')");
-  const signedOut = structuredClone(fixture); signedOut.auth.loggedIn = false; signedOut.tunnels = [];
-  await load("dark", signedOut);
-  await check("signed out cannot expose", "document.querySelector('.expose-button').disabled && document.querySelector('.empty-state').textContent.includes('Sign in')");
   const empty = structuredClone(fixture); empty.tunnels = [];
   await load("light", empty);
   await check("empty state exposes primary task", "document.querySelector('.empty-state').textContent.includes('No tunnels yet')");
+  await checkAligned("empty state");
+
+  // Startup and sign-in states (all synthetic; the fake IPC never reaches devtunnel).
+  const authFixture = (authState, extra = {}) => Object.assign(structuredClone(fixture), {
+    authState, tunnelsLoaded: false, tunnels: [], auth: authState.kind === "signedIn" ? fixture.auth : { loggedIn: false, message: "Not logged in." },
+    lastRefresh: authState.kind === "checking" || authState.kind === "signedIn" ? null : fixture.lastRefresh,
+  }, extra);
+  const soon = (ms) => new Date(Date.now() + ms).toISOString();
+  const authStates = {
+    checking: authFixture({ kind: "checking" }),
+    loading: authFixture({ kind: "signedIn" }),
+    signedOut: authFixture({ kind: "signedOut" }),
+    expired: authFixture({ kind: "expired" }, { settings: { ...fixture.settings, lastProvider: "github", signedIn: true } }),
+    browser: authFixture({ kind: "signedOut" }, { login: { kind: "running", provider: "microsoft" } }),
+    deviceCode: authFixture({ kind: "signedOut" }, { login: { kind: "deviceCode", provider: "github", url: "https://login.example.invalid/device", code: "ABCD-EFGH", expiresAt: soon(14 * 60_000 + 32_000) } }),
+    denied: authFixture({ kind: "signedOut" }, { login: { kind: "failed", provider: "microsoft", reason: "denied", deviceCode: false, code: null, message: "This account can’t use Dev Tunnels. Try a different account." } }),
+    cancelled: authFixture({ kind: "signedOut" }, { login: { kind: "failed", provider: "microsoft", reason: "cancelled", deviceCode: false, code: null, message: "Sign-in cancelled." } }),
+    codeExpired: authFixture({ kind: "signedOut" }, { login: { kind: "failed", provider: "github", reason: "timedOut", deviceCode: true, code: "ABCD-EFGH", message: "The device code expired." } }),
+    offline: authFixture({ kind: "offline", message: "Couldn’t reach the Dev Tunnels service.", attempt: 2, retryInSecs: 10, retryAt: soon(8_000) }),
+    cliMissing: authFixture({ kind: "cliMissing" }, { cliPath: null }),
+    error: authFixture({ kind: "error", message: "devtunnel exited with status 1: unexpected response" }),
+  };
+  const freshen = () => { authStates.offline.authState.retryAt = soon(8_000); authStates.deviceCode.login.expiresAt = soon(14 * 60_000 + 32_000); };
+  for (const theme of ["light", "dark"]) {
+    for (const [name, data] of Object.entries(authStates)) {
+      freshen();
+      await load(theme, data);
+      await check(`${theme}: ${name} never shows tunnels or the refresh banner`, "!document.querySelector('.tunnel-card')&&!document.querySelector('.banner.warning')");
+      if (name !== "loading") await check(`${theme}: ${name} disables Expose`, "document.querySelector('.expose-button').disabled");
+      if (name === "checking" || name === "loading") {
+        await check(`${theme}: ${name} shows skeleton, not sign-in choices`, "!!document.querySelector('.skeleton-list')&&!document.querySelector('.auth-screen')&&![...document.querySelectorAll('button')].some(b=>/Continue with/.test(b.textContent))");
+      } else {
+        await check(`${theme}: ${name} renders its auth screen`, "!!document.querySelector('.auth-screen')");
+        await checkAligned(`${theme}: ${name}`);
+      }
+      const docName = { checking: "checking", signedOut: "signed-out", deviceCode: "device-code", offline: "offline" }[name];
+      if (docName) await snapshot(`auth-${docName}-${theme}`);
+      else if (process.env.UI_ALL_AUTH_STATES) await snapshot(`auth-${name}-${theme}`);
+    }
+  }
+  await load("light", authStates.checking);
+  await check("checking subtitle and footer are explicit", "document.querySelector('header').textContent.includes('Checking sign-in')&&document.querySelector('footer').textContent.includes('Starting')");
+  await evaluate("Object.assign(fake.snapshot,{authState:{kind:'signedIn'},tunnelsLoaded:true,auth:" + JSON.stringify(fixture.auth) + ",tunnels:" + JSON.stringify(fixture.tunnels) + "});fake.publish()");
+  await settle();
+  await check("check → signed in swaps the skeleton for the list", "!document.querySelector('.skeleton-list')&&document.querySelectorAll('.tunnel-card').length===3&&document.querySelector('.tunnel-list').classList.contains('reveal')");
+  await load("light", authStates.browser);
+  await check("browser sign-in disables every sign-in control with a reason", "[...document.querySelectorAll('.auth-stack button')].filter(b=>b.textContent.includes('Continue')||b.textContent.includes('Waiting')).every(b=>b.disabled)&&document.querySelector('.auth-screen').textContent.includes('Waiting for Microsoft')");
+  await check("browser sign-in orbit is concentric with the badge", "(()=>{const b=document.querySelector('.auth-badge').getBoundingClientRect(),o=document.querySelector('.auth-orbit').getBoundingClientRect();return Math.abs((b.left+b.right)/2-(o.left+o.right)/2)<=1&&Math.abs((b.top+b.bottom)/2-(o.top+o.bottom)/2)<=1})()");
+  await clickText("Cancel sign-in");
+  await check("browser sign-in cancel is wired", "fake.calls.some(c=>c.command==='cancel_login')");
+  freshen();
+  await load("light", authStates.deviceCode);
+  await check("device code shows code and countdown", "document.querySelector('.auth-screen').textContent.includes('ABCD-EFGH')&&/1[34]:\\d\\d/.test(document.querySelector('.auth-screen').textContent)");
+  await check("device-code orbit is concentric with the badge", "(()=>{const b=document.querySelector('.auth-badge').getBoundingClientRect(),o=document.querySelector('.auth-orbit').getBoundingClientRect();return Math.abs((b.left+b.right)/2-(o.left+o.right)/2)<=1&&Math.abs((b.top+b.bottom)/2-(o.top+o.bottom)/2)<=1})()");
+  await load("light", authStates.expired);
+  await check("expired promotes the last-used provider", "document.querySelector('.auth-stack button.primary').textContent.includes('GitHub')");
+  await clickText("Continue with GitHub");
+  await check("expired primary starts sign-in with that provider", "fake.calls.some(c=>c.command==='start_login'&&c.args.provider==='github'&&c.args.deviceCode===false)");
+  await load("light", authStates.signedOut);
+  await check("signed out defaults to Microsoft first", "document.querySelector('.auth-stack button.primary').textContent.includes('Microsoft')");
+  freshen();
+  await load("light", authStates.offline);
+  await check("offline shows a retry countdown", "/Retrying automatically in \\d+s/.test(document.querySelector('.auth-screen').textContent)");
+  await clickText("Retry now");
+  await check("offline Retry now refreshes", "fake.calls.some(c=>c.command==='refresh')");
+  await load("light", authStates.codeExpired);
+  await clickText("Get a new code");
+  await check("expired code restarts device-code sign-in with the same provider", "fake.calls.some(c=>c.command==='start_login'&&c.args.provider==='github'&&c.args.deviceCode===true)");
+  await load("light", authStates.cliMissing);
+  await check("missing CLI has explicit recovery", "document.querySelector('.auth-screen').textContent.includes('devtunnel')&&!!document.querySelector('.auth-pair')");
+  await clickText("Set path in Settings");
+  await check("missing CLI opens Settings", "!!document.querySelector('.login-panel, .settings-content')");
+  await load("light", authStates.error);
+  await clickText("View logs");
+  await check("error View logs opens app logs", "fake.calls.some(c=>c.command==='get_logs'&&c.args.id==='_app')&&document.querySelector('header').textContent.includes('Tunnel Bar')");
+  await check("auth states have no runtime errors", "fake.errors.length===0");
   for (const theme of ["light", "dark"]) {
     await load(theme);
     await clickText("Expose");
@@ -481,7 +572,7 @@ try {
     await scrollTo(".login-panel");
     await snapshot("settings-account-" + theme);
     await click(".login-mode input");
-    await clickText("GitHub", ".login-panel button");
+    await clickText("Continue with GitHub", ".login-panel button");
     await check(theme + ": device-code sign-in uses provider and mode", "fake.calls.some(c=>c.command==='start_login'&&c.args.provider==='github'&&c.args.deviceCode===true)&&document.querySelector('.device-code').textContent.includes('ABCD-EFGH')");
     await scrollTo(".login-panel");
     await snapshot("sign-in-device-code-" + theme);
@@ -609,12 +700,13 @@ try {
   await check("initial snapshot retry recovers without a stale error", "document.querySelectorAll('.tunnel-card').length===3&&!document.querySelector('[role=alert]')");
   await click('[aria-label="Copy SSH command for port 2222"]');
   await evaluate("document.querySelector('[aria-label=\"Dismiss notification\"]').focus()");
+
   await evaluate("new Promise(resolve=>setTimeout(resolve,2800))");
   await check("keyboard focus pauses toast dismissal", "!!document.querySelector('[role=status]')");
   await click('[aria-label="Dismiss notification"]');
   const externalHost = structuredClone(fixture); externalHost.tunnels[1].hostState={kind:"external",pid:4321};
   await load("light",externalHost);
-  await check("external host ownership is not taken over or stopped", "!document.querySelector('[data-tunnel=\"example-preview.test\"] .card-actions button')");
+  await check("external host offers only explicit Take over / Stop", "[...document.querySelectorAll('[data-tunnel=\"example-preview.test\"] .card-actions button')].map(n=>n.textContent.trim()).join('|')==='Take over|Stop'&&!fake.calls.some(c=>c.command==='adopt_external'||c.command==='stop_external')");
   const protectedHost = structuredClone(fixture); protectedHost.tunnels[1].createdByApp=false;
   await load("light",protectedHost);
   await clickText("Require sign-in");

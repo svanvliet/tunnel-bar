@@ -67,6 +67,8 @@ See [docs/phase3-ui-hooks.md](docs/phase3-ui-hooks.md) for the commands and fiel
 - Launch at login and notifications on unexpected drops and reconnects.
 - Configure or disable the global popover hotkey (default ⌘⌥⇧T on macOS; Ctrl+Alt+Shift+T on Windows), and filter tunnels by label without stopping connections.
 - Auto-detect the `devtunnel` CLI or set its path. Sign in with Microsoft or GitHub using a browser or device code; sign out after inline confirmation.
+- At launch, Tunnel Bar checks your existing `devtunnel` sign-in and shows placeholder cards until your tunnels load, so sign-in buttons never flash while it auto-signs in. While you sign in, the other options are disabled and the screen says what it's waiting for; device codes show their 15-minute countdown.
+- Clear failure screens: an expired sign-in puts the account you last used first; if Dev Tunnels can't be reached it retries automatically (5 s, 10 s, 20 s… up to a minute) with a **Retry now** button; a missing CLI shows the install command; cancelled, denied or expired-code sign-ins explain what happened and how to try again; unexpected errors link to the app log.
 - Settings live in `~/Library/Application Support/me.svv.tunnelbar/` (`%APPDATA%\me.svv.tunnelbar` on Windows).
 
 <picture>
@@ -74,8 +76,20 @@ See [docs/phase3-ui-hooks.md](docs/phase3-ui-hooks.md) for the commands and fiel
   <img src="docs/screenshots/settings-light.png" width="400" alt="Settings for launch at login, connection notifications, the global shortcut and label filtering">
 </picture>
 <picture>
-  <source media="(prefers-color-scheme: dark)" srcset="docs/screenshots/sign-in-device-code-dark.png">
-  <img src="docs/screenshots/sign-in-device-code-light.png" width="400" alt="Device-code sign-in with Copy code, Open sign-in page and Cancel sign-in controls">
+  <source media="(prefers-color-scheme: dark)" srcset="docs/screenshots/auth-checking-dark.png">
+  <img src="docs/screenshots/auth-checking-light.png" width="400" alt="Startup: Checking your Dev Tunnels sign-in, with placeholder tunnel cards">
+</picture>
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/screenshots/auth-signed-out-dark.png">
+  <img src="docs/screenshots/auth-signed-out-light.png" width="400" alt="Sign in to Dev Tunnels with Continue with Microsoft and Continue with GitHub buttons and links to use a device code or Terminal">
+</picture>
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/screenshots/auth-device-code-dark.png">
+  <img src="docs/screenshots/auth-device-code-light.png" width="400" alt="Device-code sign-in with the code, Copy code, Open sign-in page, an expiry countdown and Cancel sign-in">
+</picture>
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/screenshots/auth-offline-dark.png">
+  <img src="docs/screenshots/auth-offline-light.png" width="400" alt="Can't reach Dev Tunnels, with Retry now and an automatic retry countdown">
 </picture>
 
 ### Updates

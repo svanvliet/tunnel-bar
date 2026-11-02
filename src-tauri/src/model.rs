@@ -184,6 +184,10 @@ pub struct Settings {
     /// Tunnels this device hosted most recently (by Tunnel Bar or an external `devtunnel host`).
     /// Kept while the host is down; dropped once another device is seen hosting.
     pub hosted_here: BTreeSet<String>,
+    /// Provider of the last successful sign-in; promoted to the primary button when the sign-in expires.
+    pub last_provider: Option<LoginProvider>,
+    /// Last known sign-in result. True turns a later "not logged in" into `AuthState::Expired`; signing out clears it.
+    pub signed_in: bool,
 }
 
 pub const DEFAULT_HOTKEY: &str = "CmdOrCtrl+Alt+Shift+T";
@@ -199,8 +203,43 @@ impl Default for Settings {
             hotkey: Some(DEFAULT_HOTKEY.into()),
             label_filter: Vec::new(),
             hosted_here: BTreeSet::new(),
+            last_provider: None,
+            signed_in: false,
         }
     }
+}
+
+/// What the popover shows before (or instead of) the tunnel list. Published from the first snapshot,
+/// so "unknown" is never confused with "signed out".
+#[derive(Debug, Clone, Serialize, PartialEq, Default)]
+#[serde(tag = "kind", rename_all = "camelCase", rename_all_fields = "camelCase")]
+pub enum AuthState {
+    /// Looking for the CLI or waiting for `devtunnel user show`.
+    #[default]
+    Checking,
+    SignedIn,
+    /// Never signed in on this device, or signed out explicitly.
+    SignedOut,
+    /// Was signed in before, but the CLI now reports no (valid) sign-in.
+    Expired,
+    /// Couldn't reach the service; retried automatically at `retry_at` (RFC 3339).
+    Offline { message: String, attempt: u32, retry_in_secs: u64, retry_at: String },
+    /// CLI detection finished and found nothing.
+    CliMissing,
+    /// `devtunnel user show` failed in a way we don't recognise.
+    Error { message: String },
+}
+
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum LoginFailure {
+    Cancelled,
+    /// Our 15-minute timeout, or the device code expired.
+    TimedOut,
+    /// The account or tenant isn't allowed to sign in.
+    Denied,
+    Offline,
+    Error,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
@@ -439,9 +478,11 @@ pub enum LoginProvider {
 pub enum LoginState {
     /// `devtunnel user login` is running (browser flow, or waiting for the device code).
     Running { provider: LoginProvider },
-    DeviceCode { provider: LoginProvider, url: String, code: String },
+    /// `expires_at` (RFC 3339) is when Tunnel Bar gives up waiting (15 minutes after the start).
+    DeviceCode { provider: LoginProvider, url: String, code: String, expires_at: String },
     Succeeded { message: String },
-    Failed { message: String },
+    /// `code` is the device code that was showing when the sign-in failed, if any.
+    Failed { message: String, reason: LoginFailure, provider: LoginProvider, device_code: bool, code: Option<String> },
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
@@ -515,6 +556,10 @@ pub struct Snapshot {
     pub cli_path: Option<String>,
     pub cli_version: Option<String>,
     pub auth: Option<AuthStatus>,
+    /// Explicit startup/sign-in state; the UI renders auth screens from this, never from missing data.
+    pub auth_state: AuthState,
+    /// False until the tunnel list has loaded once since signing in (the UI shows skeleton cards).
+    pub tunnels_loaded: bool,
     pub tunnels: Vec<TunnelView>,
     pub settings: Settings,
     pub last_refresh: Option<String>,

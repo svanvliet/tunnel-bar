@@ -119,12 +119,14 @@ By default the service rewrites `Host` to `localhost` and `Origin` to `http(s):/
 |---|---|---|---|
 | `start_login` | `provider?` (`"microsoft"` default, `"github"`), `deviceCode?` | — | Runs `devtunnel user login` in the background. Progress appears in `Snapshot.login`. |
 | `cancel_login` | — | — | Kills the running login. |
-| `logout` | — | — | Runs `devtunnel user logout` and clears the tunnel list. Running connections keep running. |
+| `logout` | — | — | Runs `devtunnel user logout`, clears the tunnel list and sets `authState` to `signedOut` (and `settings.signedIn` to false). Running connections keep running. |
 | `set_hotkey` | `hotkey` (accelerator string, or `null` to disable) | — | Validates and registers the shortcut, then saves it and clears `hotkeyError`. |
 
 `set_hotkey` accepts strings like `"CmdOrCtrl+Alt+Shift+T"`. A modifier is required.
 
 `open_login` (open Terminal) is unchanged. Keep it as a fallback.
+
+`refresh` re-runs the sign-in check when `authState` is `offline`, `error` or `cliMissing`; the UI's "Retry now", "Try again" and "Check again" buttons call it. `get_logs` with `id: "_app"` returns the app log (used by "View logs" on the error screen).
 
 ### Updates
 
@@ -160,24 +162,38 @@ By default the service rewrites `Host` to `localhost` and `Origin` to `http(s):/
 **`Settings`**
 - `hotkey`: defaults to `CmdOrCtrl+Alt+Shift+T`.
 - `labelFilter: string[]`
+- `lastProvider: "microsoft" | "github" | null`: the provider of the last successful sign-in (from `devtunnel user show` or `start_login`). The expired screen makes it the primary button.
+- `signedIn: boolean`: whether the last check found a signed-in user. It lets the backend tell `expired` (was signed in) from `signedOut` across restarts. Existing installs start at `false`.
 
 **`Snapshot`**
 - `allLabels`: sorted, de-duplicated labels across all tunnels, for the filter chips.
+- `authState: AuthState`: the explicit sign-in state. Render from this, never from a missing `auth` or `cliPath`. One of:
+  - `{kind:"checking"}`: startup, before the first `devtunnel user show` finishes. Show the skeleton list, not sign-in choices.
+  - `{kind:"signedIn"}`
+  - `{kind:"signedOut"}`: never signed in, or signed out from the app.
+  - `{kind:"expired"}`: the CLI reports no user but the app was signed in (`settings.signedIn`).
+  - `{kind:"offline", message, attempt, retryInSecs, retryAt}`: the service couldn't be reached before the first successful check. The backend re-checks at `retryAt` (RFC 3339) with backoff 5, 10, 20, 40, then 60 s; `refresh` retries now. Each attempt is logged to `_app`.
+  - `{kind:"cliMissing"}`
+  - `{kind:"error", message}`: `devtunnel user show` failed unexpectedly. Logged to `_app`.
+  - Once `signedIn`, an offline or failing check keeps `signedIn` and the cached list, and reports the problem through `refreshError` instead.
+- `tunnelsLoaded: boolean`: true once the tunnel list has loaded for the current sign-in. While `signedIn` and false, show the skeleton ("Loading your tunnels…").
 - `login: LoginState | null`, one of:
   - `{kind:"running", provider}`
-  - `{kind:"deviceCode", provider, url, code}`
+  - `{kind:"deviceCode", provider, url, code, expiresAt}`: `expiresAt` (RFC 3339) is when the app stops waiting (15 minutes); show a countdown.
   - `{kind:"succeeded", message}`
-  - `{kind:"failed", message}`
+  - `{kind:"failed", message, reason, provider, deviceCode, code}`: `reason` is `cancelled`, `timedOut`, `denied`, `offline` or `error`. `deviceCode` says which flow failed, and `code` is the device code that was shown (for the "That code expired" screen).
 - `hotkeyError: string | null`: set when the startup registration failed, for example because another app owns the shortcut.
 - `update: UpdateState`: `{status, currentVersion, enabled, version, notes, progress, lastChecked, error}`. `status` is one of `idle`, `checking`, `upToDate`, `downloading`, `ready`, `installing` or `error`. `enabled` is false in development builds. Every check's result (up to date, update found, or failure) is logged to `_app`; background failures are only logged; `error` is set for manual checks and failed installs.
 
 ## UI notes
 
 - **Sign-in**
-  - Offer "Sign in with Microsoft / GitHub" in-app.
-  - On `deviceCode`, show the code with a copy button, then open `url` with `open_url`.
+  - The list view renders `AuthSkeleton` for `checking` (and for `signedIn` until `tunnelsLoaded`), and `AuthScreen` for every other state and while `login` is `running` or `deviceCode`. Expose and Refresh are disabled until signed in.
+  - Offer "Continue with Microsoft / GitHub" in-app, with "Use a device code" and "Use Terminal instead" as inline links. While a sign-in runs, every other control is disabled and the screen says why.
+  - On `deviceCode`, show the code with a copy button and the `expiresAt` countdown, then open `url` with `open_url`.
   - The browser flow (`deviceCode: false`) opens the system browser itself.
-  - After `succeeded`, the backend refreshes and auto-connects.
+  - After `succeeded`, the backend refreshes and auto-connects; the skeleton shows "Signed in as …" until the list fades in.
+  - Auth and empty screens share one centered column (`.auth-screen` / `.auth-column`): every block (buttons, notices, cards) uses the same width, and paired actions (`.auth-pair`) split it evenly. `scripts/render-ui.mjs` asserts this.
 - **Pins**
   - When a forward has a pin, show and copy `localhost:<pin.localPort>`, not the forward's `localPort`. For example, Copy local URL should use the pinned port.
   - `ssh_command` and `open_ssh` already switch to the pinned port, so callers can keep passing the forward's ports.

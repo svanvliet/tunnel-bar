@@ -6,7 +6,7 @@ use crate::logs::LogStore;
 use crate::model::*;
 use crate::supervisor::{SupEvent, Supervisor};
 use crate::pin::Pins;
-use crate::{cli, login, settings};
+use crate::{auth, cli, login, settings};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -19,6 +19,8 @@ pub struct Cache {
     pub cli: Option<PathBuf>,
     pub cli_version: Option<String>,
     pub auth: Option<AuthStatus>,
+    pub auth_state: AuthState,
+    pub tunnels_loaded: bool,
     pub summaries: Vec<TunnelSummary>,
     pub details: HashMap<String, TunnelDetails>,
     pub last_refresh: Option<String>,
@@ -42,6 +44,8 @@ pub struct AppState {
     /// Tunnels that dropped and haven't been restored yet (for "restored" notifications).
     pub dropped: Mutex<HashSet<String>>,
     refresh_lock: tokio::sync::Mutex<()>,
+    /// Bumped by sign-in and sign-out so an overlapping refresh discards its stale auth/list result.
+    auth_gen: std::sync::atomic::AtomicU64,
     /// Stable-port proxies for connected tunnels.
     pub pins: Pins,
     /// Hosting port-map proxies: 127.0.0.1:<tunnel port> -> localhost:<local port> while this Mac hosts.
@@ -168,6 +172,7 @@ impl AppState {
                 externals: Mutex::new(Vec::new()),
                 dropped: Mutex::new(HashSet::new()),
                 refresh_lock: tokio::sync::Mutex::new(()),
+                auth_gen: std::sync::atomic::AtomicU64::new(0),
             }
         })
     }
@@ -294,6 +299,8 @@ impl AppState {
             cli_path: cache.cli.as_ref().map(|p| p.display().to_string()),
             cli_version: cache.cli_version.clone(),
             auth: cache.auth.clone(),
+            auth_state: cache.auth_state.clone(),
+            tunnels_loaded: cache.tunnels_loaded,
             tunnels,
             settings,
             last_refresh: cache.last_refresh.clone(),
@@ -370,7 +377,7 @@ impl AppState {
             }
             ConnState::AuthRequired { .. } => {
                 self.notify("Dev Tunnels sign-in required", "Run `devtunnel user login`, then reconnect.");
-                self.cache.lock().unwrap().auth = Some(AuthStatus { logged_in: false, message: "Login required".into() });
+                self.mark_expired();
             }
             ConnState::Disconnected => {
                 self.dropped.lock().unwrap().remove(id);
@@ -401,13 +408,21 @@ impl AppState {
             }
             ConnState::AuthRequired { .. } => {
                 self.notify("Dev Tunnels sign-in required", "Run `devtunnel user login`, then host again.");
-                self.cache.lock().unwrap().auth = Some(AuthStatus { logged_in: false, message: "Login required".into() });
+                self.mark_expired();
             }
             ConnState::Disconnected => {
                 self.dropped.lock().unwrap().remove(&key);
             }
             _ => {}
         }
+    }
+
+    /// A connection reported that the sign-in is no longer valid.
+    fn mark_expired(&self) {
+        let mut c = self.cache.lock().unwrap();
+        c.auth = Some(AuthStatus { logged_in: false, message: "Login required".into() });
+        c.auth_state = AuthState::Expired;
+        c.tunnels_loaded = false;
     }
 
     pub async fn cli_path(&self) -> Option<PathBuf> {
@@ -420,6 +435,21 @@ impl AppState {
     /// Re-reads auth + tunnels from the CLI.
     pub async fn refresh(self: &Arc<Self>) {
         let Ok(_guard) = self.refresh_lock.try_lock() else { return };
+        self.run_refresh().await;
+    }
+
+    /// Like `refresh`, but waits for an in-flight refresh instead of skipping, so a sign-in/out is always re-checked.
+    async fn refresh_after_auth_change(self: &Arc<Self>) {
+        self.invalidate_auth();
+        let _guard = self.refresh_lock.lock().await;
+        self.run_refresh().await;
+    }
+
+    fn invalidate_auth(&self) {
+        self.auth_gen.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    async fn run_refresh(self: &Arc<Self>) {
         self.cache.lock().unwrap().refreshing = true;
         self.publish();
         let result = self.refresh_inner().await;
@@ -435,6 +465,11 @@ impl AppState {
 
     async fn refresh_inner(self: &Arc<Self>) -> Result<(), String> {
         let Some(cli_path) = self.cli_path().await else {
+            {
+                let mut c = self.cache.lock().unwrap();
+                c.auth_state = AuthState::CliMissing;
+                c.tunnels_loaded = false;
+            }
             let install = if cfg!(windows) { "winget install Microsoft.devtunnel" } else { "brew install --cask devtunnel" };
             return Err(format!("devtunnel CLI not found. Install it ({install}) or set its path in Settings."));
         };
@@ -442,11 +477,48 @@ impl AppState {
             let v = cli::version(&cli_path).await;
             self.cache.lock().unwrap().cli_version = v;
         }
-        let auth = cli::auth_status(&cli_path).await?;
-        let logged_in = auth.logged_in;
-        self.cache.lock().unwrap().auth = Some(auth);
-        if !logged_in {
+        let generation = self.auth_gen.load(std::sync::atomic::Ordering::SeqCst);
+        let stale = || self.auth_gen.load(std::sync::atomic::Ordering::SeqCst) != generation;
+        let check = cli::auth_status(&cli_path).await;
+        if stale() {
             return Ok(());
+        }
+        let was_signed_in = self.settings.lock().unwrap().signed_in;
+        let next = {
+            let mut c = self.cache.lock().unwrap();
+            let next = auth::transition(&c.auth_state, &check, was_signed_in, chrono::Local::now());
+            match &check {
+                auth::AuthCheck::SignedIn { message, .. } => c.auth = Some(AuthStatus { logged_in: true, message: message.clone() }),
+                auth::AuthCheck::SignedOut { message } => c.auth = Some(AuthStatus { logged_in: false, message: message.clone() }),
+                _ => {}
+            }
+            if next != AuthState::SignedIn {
+                c.tunnels_loaded = false;
+            }
+            c.auth_state = next.clone();
+            next
+        };
+        if next == AuthState::SignedIn {
+            // A sign-in that failed earlier is moot once the CLI is signed in (e.g. via Terminal).
+            let mut login = self.login.lock().unwrap();
+            if matches!(*login, Some(LoginState::Failed { .. })) {
+                *login = None;
+            }
+        }
+        match (&check, &next) {
+            (auth::AuthCheck::SignedIn { provider, .. }, _) => self.remember_sign_in(*provider),
+            // Signed in already: keep the list and report the failure as a refresh error.
+            (auth::AuthCheck::Offline { message } | auth::AuthCheck::Error { message }, AuthState::SignedIn) => return Err(message.clone()),
+            (_, AuthState::Offline { attempt, retry_in_secs, .. }) => {
+                self.logs.push("_app", "app", &format!("Dev Tunnels unreachable (attempt {attempt}); retrying in {retry_in_secs}s"));
+                self.retry_offline(*attempt, *retry_in_secs);
+                return Ok(());
+            }
+            (auth::AuthCheck::Error { message }, _) => {
+                self.logs.push("_app", "app", &format!("devtunnel user show failed: {message}"));
+                return Ok(());
+            }
+            _ => return Ok(()),
         }
         let mut summaries = cli::list(&cli_path).await?;
         {
@@ -470,6 +542,9 @@ impl AppState {
                 }
             }
         }
+        if stale() {
+            return Ok(());
+        }
         let mut c = self.cache.lock().unwrap();
         // Keep previous details for tunnels whose `show` failed transiently.
         for s in &summaries {
@@ -479,6 +554,7 @@ impl AppState {
         }
         c.summaries = summaries;
         c.details = details;
+        c.tunnels_loaded = true;
         Ok(())
     }
 
@@ -769,6 +845,34 @@ impl AppState {
         self.hoster.disconnect(id);
         // The relay's host count lags; refresh so the card doesn't claim "hosted elsewhere".
         self.refresh_later(3);
+    }
+
+    /// Persists that this device is signed in (and with which provider), so a later "not logged in" reads as expired.
+    fn remember_sign_in(&self, provider: Option<LoginProvider>) {
+        let changed = {
+            let mut s = self.settings.lock().unwrap();
+            let before = (s.signed_in, s.last_provider);
+            s.signed_in = true;
+            if provider.is_some() {
+                s.last_provider = provider;
+            }
+            before != (s.signed_in, s.last_provider)
+        };
+        if changed && let Err(e) = self.save_settings() {
+            self.logs.push("_app", "app", &format!("Couldn't save settings: {e}"));
+        }
+    }
+
+    /// Re-checks after an offline backoff, unless something else (Retry now, a wake) already moved on.
+    fn retry_offline(self: &Arc<Self>, attempt: u32, secs: u64) {
+        let this = self.clone();
+        tauri::async_runtime::spawn(async move {
+            tokio::time::sleep(Duration::from_secs(secs)).await;
+            let due = matches!(this.cache.lock().unwrap().auth_state, AuthState::Offline { attempt: a, .. } if a == attempt);
+            if due {
+                this.refresh().await;
+            }
+        });
     }
 
     /// The service is eventually consistent; re-read after it settles.
@@ -1271,7 +1375,9 @@ impl AppState {
             .await;
             *this.login_cancel.lock().unwrap() = None;
             if matches!(fin, LoginState::Succeeded { .. }) {
-                this.refresh().await;
+                this.invalidate_auth();
+                this.remember_sign_in(Some(provider));
+                this.refresh_after_auth_change().await;
                 this.auto_connect().await;
             }
         });
@@ -1287,17 +1393,24 @@ impl AppState {
     /// Signs the CLI out. Running connections/hosts are left alone (they keep their relay sessions).
     pub async fn logout(self: &Arc<Self>) -> Result<(), String> {
         let cli = self.cli_path().await.ok_or("devtunnel CLI not found")?;
+        self.invalidate_auth();
         cli::logout(&cli).await?;
         self.logs.push("_app", "app", "Signed out of devtunnel");
         {
             let mut c = self.cache.lock().unwrap();
             c.auth = Some(AuthStatus { logged_in: false, message: "Not logged in.".into() });
+            c.auth_state = AuthState::SignedOut;
+            c.tunnels_loaded = false;
             c.summaries.clear();
             c.details.clear();
         }
         *self.login.lock().unwrap() = None;
+        self.settings.lock().unwrap().signed_in = false;
+        if let Err(e) = self.save_settings() {
+            self.logs.push("_app", "app", &format!("Couldn't save settings: {e}"));
+        }
         self.publish();
-        self.refresh().await;
+        self.refresh_after_auth_change().await;
         Ok(())
     }
 

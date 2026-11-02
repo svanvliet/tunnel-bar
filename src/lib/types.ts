@@ -76,10 +76,27 @@ export interface Settings {
   hotkey?: string | null;
   /** Show only tunnels with any of these labels (empty = all). Change via `set_label_filter`. */
   labelFilter: string[];
+  /** Provider of the last successful sign-in (primary button when the sign-in expired). */
+  lastProvider?: LoginProvider | null;
+  /** Last known sign-in result; a later "not logged in" becomes `authState.kind === "expired"`. */
+  signedIn?: boolean;
 }
+/** Explicit startup/sign-in state; render auth screens from this, never from missing `auth`/`cliPath`. */
+export type AuthState =
+  | { kind: "checking" }
+  | { kind: "signedIn" }
+  | { kind: "signedOut" }
+  | { kind: "expired" }
+  /** `retryAt` is RFC 3339; the backend retries on its own (call `refresh` to retry now). */
+  | { kind: "offline"; message: string; attempt: number; retryInSecs: number; retryAt: string }
+  | { kind: "cliMissing" }
+  | { kind: "error"; message: string };
 export interface Snapshot {
   cliPath?: string | null; cliVersion?: string | null;
   auth?: { loggedIn: boolean; message: string } | null;
+  authState: AuthState;
+  /** False until the tunnel list has loaded once since signing in (show skeleton cards). */
+  tunnelsLoaded: boolean;
   tunnels: TunnelView[]; settings: Settings; lastRefresh?: string | null;
   refreshError?: string | null; refreshing: boolean; logDir: string;
   allLabels: string[];
@@ -125,9 +142,12 @@ export interface DeletePreflight {
 export type LoginProvider = "microsoft" | "github";
 export type LoginState =
   | { kind: "running"; provider: LoginProvider }
-  | { kind: "deviceCode"; provider: LoginProvider; url: string; code: string }
+  /** `expiresAt` (RFC 3339): Tunnel Bar stops waiting for the code then. */
+  | { kind: "deviceCode"; provider: LoginProvider; url: string; code: string; expiresAt: string }
   | { kind: "succeeded"; message: string }
-  | { kind: "failed"; message: string };
+  /** `code` is the device code that was showing when it failed, if any. */
+  | { kind: "failed"; message: string; reason: LoginFailure; provider: LoginProvider; deviceCode: boolean; code?: string | null };
+export type LoginFailure = "cancelled" | "timedOut" | "denied" | "offline" | "error";
 
 /** Error-message prefixes from delete_tunnel / add_port / remove_port: retry with the matching flag after asking. */
 export const CONFIRM_REQUIRED = "CONFIRM_REQUIRED: ";

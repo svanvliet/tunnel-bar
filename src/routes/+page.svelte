@@ -12,6 +12,8 @@
   import HeaderFields from "$lib/HeaderFields.svelte";
   import AccessRuleFields from "$lib/AccessRuleFields.svelte";
   import LoginPanel from "$lib/LoginPanel.svelte";
+  import AuthScreen from "$lib/AuthScreen.svelte";
+  import AuthSkeleton from "$lib/AuthSkeleton.svelte";
   import type { Notice } from "$lib/Notification.svelte";
   import type { Snapshot, TunnelView, LogLine, Forward, HostedPort, TunnelSettings, AccessEntry, AccessRuleRequest, LoginProvider } from "$lib/types";
   import { DEFAULT_HOTKEY, errorKind, stripErrorPrefix } from "$lib/types";
@@ -60,11 +62,49 @@
   const remote = $derived(remoteTunnels(visibleTunnels));
   const local = $derived(localTunnels(visibleTunnels));
   const detailTunnel = $derived(snap?.tunnels.find((t) => t.id === detailId));
-  const ready = $derived(!!snap?.cliPath && !!snap?.auth?.loggedIn);
+  const ready = $derived(!!snap?.cliPath && snap?.authState?.kind === "signedIn");
   const logTunnel = $derived(snap?.tunnels.find((t) => t.id === logId));
   const account = $derived(snap?.auth?.loggedIn
     ? snap.auth.message.replace(/^Logged in as /, "").replace(/ using .*$/, "").replace(/\.$/, "")
     : "Not signed in");
+  const signingIn = $derived(snap?.login?.kind === "running" || snap?.login?.kind === "deviceCode");
+  /** What the list view shows instead of tunnels: "skeleton" while checking/loading, "auth" for sign-in and failure screens. */
+  const listMode = $derived.by(() => {
+    if (!snap) return "skeleton";
+    if (signingIn) return "auth";
+    const kind = snap.authState?.kind ?? "checking";
+    if (kind === "checking") return "skeleton";
+    if (kind === "signedIn") return snap.tunnelsLoaded || snap.refreshError && !snap.refreshing ? "list" : "skeleton";
+    return "auth";
+  });
+  const skeletonStatus = $derived.by(() => {
+    if (!snap || snap.authState?.kind === "checking") return { text: "Checking your Dev Tunnels sign-in…", tone: "busy" as const };
+    if (snap.login?.kind === "succeeded") return { text: `Signed in as ${account}`, tone: "ok" as const };
+    return { text: "Loading your tunnels…", tone: "busy" as const };
+  });
+  const listSubtitle = $derived.by(() => {
+    if (signingIn) return "Signing in…";
+    switch (snap?.authState?.kind ?? "checking") {
+      case "checking": return "Checking sign-in…";
+      case "signedIn": return account;
+      case "expired": return "Sign-in expired";
+      case "offline": return "Can’t reach Dev Tunnels";
+      case "cliMissing": return "devtunnel not found";
+      case "error": return "Couldn’t check sign-in";
+      default: return "Not signed in";
+    }
+  });
+  /** Stagger the cards in once, when the list first replaces the skeleton. */
+  let revealList = $state(false);
+  let lastListMode = "skeleton";
+  $effect(() => {
+    const mode = listMode;
+    if (mode === "list" && lastListMode === "skeleton" && !reduced) {
+      revealList = true;
+      setTimeout(() => (revealList = false), 900);
+    }
+    lastListMode = mode;
+  });
 
   function success(title: string, detail = "", copyKey?: string) {
     if (copyKey) {
@@ -264,6 +304,13 @@
     await navigate("logs");
     logBox?.scrollTo(0, logBox.scrollHeight);
   }
+  async function openAppLogs() {
+    const result = await command<LogLine[]>("get_logs", { id: "_app" }, "Couldn’t load logs", "logs");
+    if (!result.ok) return;
+    logId = "_app"; logs = result.value; follow = true;
+    await navigate("logs");
+    logBox?.scrollTo(0, logBox.scrollHeight);
+  }
   async function clearLogs() {
     if (!logId) return;
     const result = await command("clear_logs", { id: logId }, "Couldn’t clear logs", "logs");
@@ -303,13 +350,13 @@
     <div class="header-title">
       <h1 tabindex="-1" bind:this={heading}>{view === "list" ? "Tunnel Bar" : view === "expose" ? "Expose a local port" : view === "logs" ? "Logs" : view === "details" ? "Tunnel details" : "Settings"}</h1>
       <span class="header-subtitle" title={view === "logs" ? logTunnel?.displayName ?? logId ?? "" : snap?.auth?.message ?? ""}>
-        {view === "list" ? account : view === "logs" ? logTunnel?.displayName ?? logId : view === "details" ? detailTunnel?.displayName ?? detailId : view === "expose" ? "New local tunnel" : "Tunnel Bar"}
+        {view === "list" ? listSubtitle : view === "logs" ? logTunnel?.displayName ?? (logId === "_app" ? "Tunnel Bar" : logId) : view === "details" ? detailTunnel?.displayName ?? detailId : view === "expose" ? "New local tunnel" : "Tunnel Bar"}
       </span>
     </div>
     {#if view === "list"}
       <div class="header-tools">
         <button class="primary expose-button" disabled={!ready} title="Expose a local port" onclick={openExpose}><Icon name="plus" size={14} />Expose</button>
-        <button class="icon-button" title="Refresh tunnels" aria-label="Refresh tunnels" disabled={snap?.refreshing || busy.includes("refresh")} onclick={refresh}>
+        <button class="icon-button" title="Refresh tunnels" aria-label="Refresh tunnels" disabled={!snap || snap.refreshing || busy.includes("refresh") || signingIn || snap.authState?.kind === "checking"} onclick={refresh}>
           <span class:refreshing={snap?.refreshing}><Icon name="refresh" /></span>
         </button>
         <button class="icon-button" title="Settings" aria-label="Settings" onclick={openSettings}><Icon name="settings" /></button>
@@ -321,13 +368,14 @@
 
   {#if view === "list"}
     <section class="list-content" aria-label="Tunnels">
-      {#if !snap}
-        <div class="loading-state" aria-label="Loading tunnels" aria-busy="true"><div></div><div></div><div></div><span class="hint">Loading tunnels…</span></div>
-      {:else if !snap.cliPath}
-        <div class="empty-state"><Icon name="terminal" size={32} /><h2>devtunnel CLI not found</h2><p>Install the devtunnel CLI or set its path in Settings.</p><code class="selectable">{windows ? "winget install Microsoft.devtunnel" : "brew install --cask devtunnel"}</code><button onclick={openSettings}>Open Settings</button></div>
-      {:else if !snap.auth?.loggedIn}
-        <div class="empty-state"><Icon name="lock" size={32} /><h2>Sign in to Dev Tunnels</h2><p>Use your Microsoft or GitHub account to view and manage your tunnels.</p>
-          <LoginPanel login={snap.login} loggedIn={false} {account} busy={busy.includes("login")} onStart={startLogin} onCancel={cancelLogin} onLogout={logout} onFallback={openLogin} onCopy={(code) => clipboard(code, "Code copied", "Sign-in device code", "login-code")} onOpen={openUrl} />
+      {#if listMode === "skeleton"}
+        <AuthSkeleton status={skeletonStatus.text} tone={skeletonStatus.tone} />
+      {:else if listMode === "auth" && snap}
+        <div in:fade={{ duration: motionDuration(reduced, 160) }}>
+          <AuthScreen authState={snap.authState} login={snap.login} lastProvider={snap.settings.lastProvider} refreshing={snap.refreshing || busy.includes("refresh")}
+            busy={busy.includes("login")} {windows} onStart={startLogin} onCancel={cancelLogin} onFallback={openLogin} onOpen={openUrl} onRefresh={refresh}
+            onCopy={(code) => clipboard(code, "Code copied", "Sign-in device code", "login-code")} onSettings={openSettings} onLogs={openAppLogs}
+            onCopyCommand={(text) => clipboard(text, "Command copied", text, "install-command")} />
         </div>
       {/if}
       {#if updateReady && update && updateLater !== update.version}
@@ -335,7 +383,8 @@
           <div class="button-row"><button class="primary" disabled={update.status === "installing" || busy.includes("update")} onclick={installUpdate}>{update.status === "installing" ? "Restarting…" : "Restart to update"}</button><button class="quiet" disabled={update.status === "installing"} onclick={() => (updateLater = update.version ?? null)}>Later</button></div></div></div>
       {/if}
       {#if snap?.adminDevtunnel}<div class="banner warning"><Icon name="warning" /><div><strong>devtunnel is running as administrator</strong><p>Tunnel Bar can’t tell which tunnel it serves. Stop it in that terminal to manage it here.</p></div></div>{/if}
-      {#if snap?.refreshError}<div class="banner warning"><Icon name="warning" /><div><strong>Couldn’t refresh tunnels</strong><p class="selectable">{snap.refreshError}</p><button class="quiet" disabled={snap.refreshing} onclick={refresh}>Retry refresh</button></div></div>{/if}
+      {#if snap?.refreshError && listMode === "list"}<div class="banner warning"><Icon name="warning" /><div><strong>Couldn’t refresh tunnels</strong><p class="selectable">{snap.refreshError}</p><button class="quiet" disabled={snap.refreshing} onclick={refresh}>Retry refresh</button></div></div>{/if}
+      {#if listMode === "list"}<div class="tunnel-list" class:reveal={revealList}>
       {#if remote.length}
         <div class="section-heading"><h2>Remote connections</h2><span>{remote.length}</span></div>
         {#each remote as t (t.id)}
@@ -352,12 +401,15 @@
             onCopyUrl={copyUrl} onOpenSsh={openSsh} onOpenUrl={openUrl} onDetails={openDetails} />
         {/each}
       {/if}
-      {#if snap && ready && !snap.tunnels.length}
-        <div class="empty-state"><Icon name="laptop" size={32} /><h2>No tunnels yet</h2><p>Share a local port through a new dev tunnel. Your account’s tunnels will appear here.</p><button class="primary" onclick={openExpose}><Icon name="plus" />Expose a local port</button><span class="hint">Existing tunnel not showing? Refresh the list.</span></div>
+      {#if snap && ready && snap.tunnelsLoaded && !snap.tunnels.length}
+        <div class="auth-screen empty-state"><div class="auth-badge"><Icon name="laptop" size={26} /></div><h2>No tunnels yet</h2><p class="auth-body">Share a local port through a new dev tunnel. Your account’s tunnels will appear here.</p>
+          <div class="auth-column"><div class="auth-stack"><button class="primary" onclick={openExpose}><Icon name="plus" />Expose a local port</button></div><span class="auth-note">Existing tunnel not showing? Refresh the list.</span></div></div>
       {/if}
       {#if ready && snap?.tunnels.length && !visibleTunnels.length}
-        <div class="empty-state"><h2>No matching tunnels</h2><p>Your label filter hides these tunnels. Connections keep running.</p><button disabled={busy.includes("settings")} onclick={() => setLabelFilter([])}>Clear label filter</button></div>
+        <div class="auth-screen empty-state"><div class="auth-badge"><Icon name="inspect" size={26} /></div><h2>No matching tunnels</h2><p class="auth-body">Your label filter hides these tunnels. Connections keep running.</p>
+          <div class="auth-column"><div class="auth-stack"><button disabled={busy.includes("settings")} onclick={() => setLabelFilter([])}>Clear label filter</button></div></div></div>
       {/if}
+      </div>{/if}
     </section>
   {:else if view === "expose"}
     <form id="expose-form" class="settings-content" onsubmit={submitExpose}>
@@ -422,7 +474,8 @@
         </div>
         <div class="settings-group">
           <strong class="field-title">Account</strong>
-          <LoginPanel login={snap.login} loggedIn={!!snap.auth?.loggedIn} {account} busy={!snap.cliPath || busy.includes("login")} onStart={startLogin} onCancel={cancelLogin} onLogout={logout} onFallback={openLogin} onCopy={(code) => clipboard(code, "Code copied", "Sign-in device code", "login-code")} onOpen={openUrl} />
+          <LoginPanel login={snap.login} loggedIn={snap.authState?.kind === "signedIn"} {account} busy={!snap.cliPath || busy.includes("login") || snap.authState?.kind === "checking"}
+            reason={snap.authState?.kind === "checking" ? "Checking your current sign-in…" : !snap.cliPath ? "Install the devtunnel CLI to sign in." : ""} onStart={startLogin} onCancel={cancelLogin} onLogout={logout} onFallback={openLogin} onCopy={(code) => clipboard(code, "Code copied", "Sign-in device code", "login-code")} onOpen={openUrl} />
         </div>
         {#if update}
           <div class="settings-group update-settings">
@@ -445,7 +498,7 @@
     </div>
   {/if}
   <footer class="app-footer">
-    {#if view === "list"}<span>Updated {ago(snap?.lastRefresh)}</span><span class="spacer"></span>{#if updateReady && update && updateLater === update.version}<button class="quiet update-pill" onclick={() => (updateLater = null)}><Icon name="download" size={12} />Update ready</button>{/if}<button class="quiet" onclick={quit}>Quit</button>
+    {#if view === "list"}<span>{snap?.lastRefresh ? `Updated ${ago(snap.lastRefresh)}` : "Starting…"}</span><span class="spacer"></span>{#if updateReady && update && updateLater === update.version}<button class="quiet update-pill" onclick={() => (updateLater = null)}><Icon name="download" size={12} />Update ready</button>{/if}<button class="quiet" onclick={quit}>Quit</button>
     {:else if view === "expose"}<span class="spacer"></span><button class="quiet" disabled={busy.includes("expose")} onclick={back}>Cancel</button><button class="primary" form="expose-form" disabled={!ready || busy.includes("expose") || !exposePort}>{busy.includes("expose") ? "Creating…" : "Expose"}</button>
     {:else if view === "logs"}<button class="quiet" disabled={busy.includes("logs")} onclick={clearLogs}>Clear</button><button class="quiet" onclick={() => clipboard(logs.map((line) => `${line.ts} ${line.text}`).join("\n"), "Logs copied", logTunnel?.displayName ?? logId ?? "", "logs")}>Copy</button><span class="spacer"></span><button class="quiet" onclick={openLogFolder}>Open folder</button>
     {:else}<span>Tunnel Bar {appVersion}</span><span class="spacer"></span><button class="quiet" onclick={quit}>Quit Tunnel Bar</button>{/if}
@@ -578,12 +631,17 @@
   .log-error { color: var(--bad); }
   .log-app { color: var(--accent); }
   .empty-state { display: flex; flex-direction: column; align-items: center; gap: 18px; text-align: center; padding: 42px 14px; }
-  .empty-state :global(> svg) { color: var(--accent); }
   .empty-state h2 { font-size: 20px; letter-spacing: -.4px; margin: 0; }
   .empty-state p { color: var(--muted); line-height: 1.6; margin: 0; }
-  .empty-state code { font-size: 11px; overflow-wrap: anywhere; }
-  .loading-state { display: flex; flex-direction: column; gap: 12px; padding: 12px 0; }
-  .loading-state > div { height: 92px; border: 1px solid var(--line); background: var(--soft); border-radius: 10px; }
+  .empty-state.auth-screen { gap: 0; padding: 30px 0 16px; }
+  .empty-state.auth-screen h2 { font-size: 18px; letter-spacing: -.35px; margin: 16px 0 0; }
+  .empty-state.auth-screen p { line-height: 1.55; margin: 6px 0 0; }
+  .tunnel-list.reveal > :global(*) { animation: list-in 320ms cubic-bezier(.2, .8, .3, 1) both; }
+  .tunnel-list.reveal > :global(:nth-child(2)) { animation-delay: 50ms; }
+  .tunnel-list.reveal > :global(:nth-child(3)) { animation-delay: 100ms; }
+  .tunnel-list.reveal > :global(:nth-child(4)) { animation-delay: 150ms; }
+  .tunnel-list.reveal > :global(:nth-child(n+5)) { animation-delay: 200ms; }
+  @keyframes list-in { from { opacity: 0; transform: translateY(6px); } }
   .banner { display: flex; align-items: flex-start; gap: 8px; font-size: 12px; padding: 10px; border-radius: 7px; margin-bottom: 10px; }
   .banner p { margin: 6px 0; overflow-wrap: anywhere; }
   .update-banner { background: var(--wash); border: 1px solid color-mix(in srgb, var(--accent) 35%, transparent); }

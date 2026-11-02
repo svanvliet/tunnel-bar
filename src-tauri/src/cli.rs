@@ -1,6 +1,6 @@
 //! Thin async wrapper around the `devtunnel` CLI.
 
-use crate::model::{AccessEntry, AccessRuleKind, AccessRuleRequest, AuthStatus, HeaderOptions, TunnelDetails, TunnelSummary};
+use crate::model::{AccessEntry, AccessRuleKind, AccessRuleRequest, HeaderOptions, TunnelDetails, TunnelSummary};
 use serde::Deserialize;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -126,15 +126,12 @@ pub async fn version(cli: &Path) -> Option<String> {
         .find_map(|l| l.strip_prefix("Tunnel CLI version:").map(|v| v.trim().to_string()))
 }
 
-pub async fn auth_status(cli: &Path) -> Result<AuthStatus, String> {
-    let out = run(cli, &["user", "show"], Duration::from_secs(30)).await?;
-    Ok(parse_auth(&out.stdout, &out.stderr))
-}
-
-pub fn parse_auth(stdout: &str, stderr: &str) -> AuthStatus {
-    let text = format!("{}\n{}", stdout.trim(), stderr.trim()).trim().to_string();
-    let first = text.lines().next().unwrap_or("").trim().to_string();
-    AuthStatus { logged_in: first.starts_with("Logged in as"), message: first }
+/// Runs `devtunnel user show` and classifies the result (never fails: errors become `Offline`/`Error`).
+pub async fn auth_status(cli: &Path) -> crate::auth::AuthCheck {
+    match run(cli, &["user", "show"], Duration::from_secs(30)).await {
+        Ok(out) => crate::auth::classify(out.success, &out.stdout, &out.stderr),
+        Err(e) => crate::auth::classify_run_error(&e),
+    }
 }
 
 #[derive(Deserialize)]
@@ -632,9 +629,4 @@ mod tests {
         assert_eq!(t.client_connections, 1);
     }
 
-    #[test]
-    fn parses_auth() {
-        assert!(parse_auth("Logged in as a@b.com using Microsoft.\n", "").logged_in);
-        assert!(!parse_auth("Not logged in.\n", "").logged_in);
-    }
 }

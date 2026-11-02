@@ -26,6 +26,14 @@ pub async fn run(
     on_line: impl Fn(&str),
 ) -> LoginState {
     on_state(&LoginState::Running { provider });
+    let mut shown_code: Option<String> = None;
+    let fail = |message: String, code: &Option<String>| LoginState::Failed {
+        reason: crate::auth::login_failure(&message),
+        message,
+        provider,
+        device_code,
+        code: code.clone(),
+    };
     let mut cmd = Command::new(cli);
     cmd.args(cli::login_args(provider, device_code))
         .stdin(Stdio::null())
@@ -38,7 +46,7 @@ pub async fn run(
     cmd.creation_flags(0x0800_0000);
     let mut child = match cmd.spawn() {
         Ok(c) => c,
-        Err(e) => return finish(&on_state, LoginState::Failed { message: format!("failed to start devtunnel: {e}") }),
+        Err(e) => return finish(&on_state, fail(format!("failed to start devtunnel: {e}"), &None)),
     };
     *pid_slot.lock().unwrap() = child.id();
     // Clears the slot however this future ends (including being dropped).
@@ -53,15 +61,15 @@ pub async fn run(
     let mut err = BufReader::new(child.stderr.take().unwrap()).lines();
     let (mut out_done, mut err_done) = (false, false);
     let mut lines: Vec<String> = Vec::new();
-    let mut seen_code = false;
+    let expires_at = (chrono::Local::now() + chrono::Duration::from_std(timeout).unwrap_or_default()).to_rfc3339();
     let deadline = tokio::time::sleep(timeout);
     tokio::pin!(deadline);
 
     let mut handle = |l: String, lines: &mut Vec<String>| {
         on_line(&l);
-        if !seen_code && let Some((url, code)) = cli::parse_device_code(&l) {
-            seen_code = true;
-            on_state(&LoginState::DeviceCode { provider, url, code });
+        if shown_code.is_none() && let Some((url, code)) = cli::parse_device_code(&l) {
+            shown_code = Some(code.clone());
+            on_state(&LoginState::DeviceCode { provider, url, code, expires_at: expires_at.clone() });
         }
         lines.push(l);
     };
@@ -79,11 +87,11 @@ pub async fn run(
             s = child.wait() => break s.ok(),
             _ = cancel.notified() => {
                 let _ = child.kill().await;
-                return finish(&on_state, LoginState::Failed { message: "Sign-in cancelled".into() });
+                return finish(&on_state, fail("Sign-in cancelled".into(), &shown_code));
             }
             _ = &mut deadline => {
                 let _ = child.kill().await;
-                return finish(&on_state, LoginState::Failed { message: "Sign-in timed out".into() });
+                return finish(&on_state, fail("Sign-in timed out".into(), &shown_code));
             }
         }
     };
@@ -97,7 +105,11 @@ pub async fn run(
         }
     };
     let _ = tokio::time::timeout(Duration::from_millis(500), drain).await;
-    finish(&on_state, outcome(status.is_some_and(|s| s.success()), &lines))
+    let fin = match outcome(status.is_some_and(|s| s.success()), &lines) {
+        Ok(message) => LoginState::Succeeded { message },
+        Err(message) => fail(message, &shown_code),
+    };
+    finish(&on_state, fin)
 }
 
 /// Synchronously stops a running login CLI (its whole process group); used on quit, when the async
@@ -119,11 +131,11 @@ fn finish(on_state: &impl Fn(&LoginState), s: LoginState) -> LoginState {
     s
 }
 
-/// Maps the CLI's exit status and output to the final state.
-pub fn outcome(success: bool, lines: &[String]) -> LoginState {
+/// Maps the CLI's exit status and output to the success message or the failure message.
+pub fn outcome(success: bool, lines: &[String]) -> Result<String, String> {
     let logged_in = lines.iter().map(|l| l.trim()).find(|l| l.starts_with("Logged in as"));
     if success {
-        return LoginState::Succeeded { message: logged_in.unwrap_or("Signed in").to_string() };
+        return Ok(logged_in.unwrap_or("Signed in").to_string());
     }
     // stdout/stderr interleave nondeterministically, so prefer an explicit error line.
     let meaningful = || lines.iter().map(|l| l.trim()).filter(|l| !l.is_empty() && !l.starts_with("Request ID:"));
@@ -132,7 +144,7 @@ pub fn outcome(success: bool, lines: &[String]) -> LoginState {
         .or_else(|| meaningful().next_back())
         .unwrap_or("Sign-in failed")
         .to_string();
-    LoginState::Failed { message }
+    Err(message)
 }
 
 #[cfg(all(test, unix))]
@@ -176,18 +188,24 @@ mod tests {
         let (fin, seen) = run_fake(&body, true, None);
         assert_eq!(fin, LoginState::Succeeded { message: "Logged in as a@b.com using Microsoft.".into() });
         assert_eq!(seen.first(), Some(&LoginState::Running { provider: LoginProvider::Microsoft }));
-        assert!(seen.contains(&LoginState::DeviceCode {
-            provider: LoginProvider::Microsoft,
-            url: "https://microsoft.com/devicelogin".into(),
-            code: "F7QRSTUVW".into()
-        }));
+        let code = seen.iter().find_map(|s| match s { LoginState::DeviceCode { provider, url, code, expires_at } => Some((*provider, url.clone(), code.clone(), expires_at.clone())), _ => None }).expect("device code state");
+        assert_eq!((code.0, code.1.as_str(), code.2.as_str()), (LoginProvider::Microsoft, "https://microsoft.com/devicelogin", "F7QRSTUVW"));
+        let expires = chrono::DateTime::parse_from_rfc3339(&code.3).unwrap();
+        let left = (expires.with_timezone(&chrono::Local) - chrono::Local::now()).num_seconds();
+        assert!((15..=20).contains(&left), "expiry follows the timeout: {left}s");
         assert_eq!(seen.last(), Some(&fin));
     }
 
     #[test]
     fn failure_reports_last_error_line() {
         let (fin, _) = run_fake("echo 'Starting login' \necho 'Error: AADSTS70016 authorization_pending expired' >&2\nexit 1", false, None);
-        assert_eq!(fin, LoginState::Failed { message: "Error: AADSTS70016 authorization_pending expired".into() });
+        assert_eq!(fin, LoginState::Failed {
+            message: "Error: AADSTS70016 authorization_pending expired".into(),
+            reason: crate::model::LoginFailure::TimedOut,
+            provider: LoginProvider::Microsoft,
+            device_code: false,
+            code: None,
+        });
     }
 
     #[test]
@@ -227,7 +245,7 @@ mod tests {
         let pidfile = tempfile::NamedTempFile::new().unwrap();
         let pf = pidfile.path().display().to_string();
         let (fin, _) = run_fake(&format!("echo $$ > '{pf}'\nexec sleep 30"), false, Some(Duration::from_millis(400)));
-        assert_eq!(fin, LoginState::Failed { message: "Sign-in cancelled".into() });
+        assert!(matches!(fin, LoginState::Failed { reason: crate::model::LoginFailure::Cancelled, .. }));
         let pid: u32 = std::fs::read_to_string(pidfile.path()).unwrap().trim().parse().unwrap();
         std::thread::sleep(Duration::from_millis(200));
         assert!(!crate::supervisor::alive(pid), "login CLI should be killed");
@@ -235,7 +253,23 @@ mod tests {
 
     #[test]
     fn outcome_without_logged_in_line() {
-        assert_eq!(outcome(true, &[]), LoginState::Succeeded { message: "Signed in".into() });
-        assert_eq!(outcome(false, &[]), LoginState::Failed { message: "Sign-in failed".into() });
+        assert_eq!(outcome(true, &[]), Ok("Signed in".into()));
+        assert_eq!(outcome(false, &[]), Err("Sign-in failed".into()));
+    }
+
+    #[test]
+    fn device_code_timeout_keeps_the_code() {
+        let dir = tempfile::tempdir().unwrap();
+        let fixture = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/login_device_code.txt");
+        let cli = fake_cli(dir.path(), &format!("cat '{fixture}'\nexec sleep 30"));
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let fin = rt.block_on(run(&cli, LoginProvider::Github, true, Arc::new(Notify::new()), Default::default(), Duration::from_millis(600), |_| {}, |_| {}));
+        assert_eq!(fin, LoginState::Failed {
+            message: "Sign-in timed out".into(),
+            reason: crate::model::LoginFailure::TimedOut,
+            provider: LoginProvider::Github,
+            device_code: true,
+            code: Some("F7QRSTUVW".into()),
+        });
     }
 }
