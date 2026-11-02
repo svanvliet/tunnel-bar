@@ -46,6 +46,8 @@ pub struct AppState {
     pub pins: Pins,
     /// Hosting port-map proxies: 127.0.0.1:<tunnel port> -> localhost:<local port> while this Mac hosts.
     pub host_maps: Pins,
+    /// SSH banner probes of connected forwards.
+    ssh_probes: crate::sshprobe::SshProbes,
     host_map_targets: Arc<Mutex<HashMap<(String, u16), u16>>>,
     pub login: Mutex<Option<LoginState>>,
     login_cancel: Mutex<Option<Arc<tokio::sync::Notify>>>,
@@ -123,6 +125,7 @@ impl AppState {
         let logs = Arc::new(LogStore::new(settings::log_dir()));
         Arc::new_cyclic(|weak: &std::sync::Weak<AppState>| {
             let weak = weak.clone();
+            let probe_weak = weak.clone();
             let listener: crate::supervisor::Listener = Arc::new(move |ev| {
                 if let Some(s) = weak.upgrade() {
                     s.on_supervisor_event(ev);
@@ -134,6 +137,11 @@ impl AppState {
                 sup2.state(id).1.iter().find(|f| f.remote_port == remote).map(|f| f.local_port)
             });
             let host_map_targets: Arc<Mutex<HashMap<(String, u16), u16>>> = Default::default();
+            let ssh_probes = crate::sshprobe::SshProbes::new(Arc::new(move || {
+                if let Some(s) = probe_weak.upgrade() {
+                    s.publish();
+                }
+            }));
             let targets = host_map_targets.clone();
             let map_resolve: crate::pin::Resolver =
                 Arc::new(move |id, remote| targets.lock().unwrap().get(&(id.to_string(), remote)).copied());
@@ -141,6 +149,7 @@ impl AppState {
                 app: app.clone(),
                 pins: Pins::new(resolve),
                 host_maps: Pins::new(map_resolve),
+                ssh_probes,
                 host_map_targets,
                 login: Mutex::new(None),
                 login_cancel: Mutex::new(None),
@@ -184,7 +193,7 @@ impl AppState {
                 ids.push(id);
             }
         }
-        let tunnels = ids
+        let mut tunnels: Vec<TunnelView> = ids
             .iter()
             .map(|id| {
                 let summary = cache.summaries.iter().find(|s| &s.tunnel_id == id).cloned();
@@ -260,9 +269,19 @@ impl AppState {
                     state,
                     forwards,
                     settings: tunnel_settings,
+                    ssh_ports: vec![],
                 }
             })
             .collect();
+        let active: Vec<(String, u16)> = tunnels
+            .iter()
+            .filter(|t| t.state.is_up())
+            .flat_map(|t| t.forwards.iter().map(|f| (t.id.clone(), f.local_port)))
+            .collect();
+        let mut ssh = self.ssh_probes.sync(&active);
+        for t in &mut tunnels {
+            t.ssh_ports = ssh.remove(&t.id).unwrap_or_default();
+        }
         let mut all_labels: Vec<String> = cache.summaries.iter().flat_map(|s| s.labels.iter().cloned()).collect();
         all_labels.sort_by_key(|l| l.to_lowercase());
         all_labels.dedup_by(|a, b| a.eq_ignore_ascii_case(b));

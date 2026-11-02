@@ -57,6 +57,8 @@ export interface TunnelView {
   hostState: ConnState; hostedPorts: HostedPort[]; anonymous: boolean; createdByApp: boolean; hostedElsewhere: boolean;
   /** "live": this device hosts it now (Tunnel Bar or an external host); "last": it hosted it last. */
   hostedHere?: "no" | "live" | "last";
+  /** Local ports of `forwards` whose server answered with an SSH banner (background probe). */
+  sshPorts?: number[];
   /** Tunnel lifetime in hours (e.g. 720 for "30 days"); null if unknown. */
   expirationHours?: number | null;
   /** False when `settings.labelFilter` is set and this tunnel has none of those labels. */

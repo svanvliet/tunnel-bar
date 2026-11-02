@@ -242,6 +242,9 @@ pub struct TunnelView {
     pub port_maps: Vec<PortMapView>,
     /// Whether this device hosts the tunnel now, or was the last device seen hosting it.
     pub hosted_here: HostedHere,
+    /// Local ports of `forwards` whose server answered with an SSH banner (`SSH-...`); probed in the
+    /// background while connected, so it may lag a few seconds behind `forwards`.
+    pub ssh_ports: Vec<u16>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq, Default)]

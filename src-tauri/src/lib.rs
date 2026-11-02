@@ -13,6 +13,7 @@ mod parser;
 mod pin;
 mod settings;
 mod ssh;
+mod sshprobe;
 mod supervisor;
 mod tray;
 mod updater;
