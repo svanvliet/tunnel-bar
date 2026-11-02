@@ -180,6 +180,12 @@ mod tests {
         std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port()
     }
 
+    /// True if `check` reports some just-released port as unused. A parallel test can grab any one such
+    /// port before `check` runs, so a few fresh ports are tried; a check that never reports free fails.
+    fn sees_a_free_port<T>(check: impl Fn(u16) -> Option<T>) -> bool {
+        (0..20).any(|_| check(free_port()).is_none())
+    }
+
     /// Echo server that prefixes replies with `tag`.
     fn echo_server(tag: &'static str) -> u16 {
         let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
@@ -279,7 +285,7 @@ mod tests {
             assert!(server.accept().is_ok(), "{any}");
             pins.stop_all();
         }
-        assert_eq!(wildcard_conflict(free_port()), None);
+        assert!(sees_a_free_port(wildcard_conflict));
     }
 
     #[test]
@@ -298,7 +304,7 @@ mod tests {
 
     #[test]
     fn port_in_use_sees_loopback_and_wildcard_listeners() {
-        assert_eq!(port_in_use(free_port()), None);
+        assert!(sees_a_free_port(port_in_use));
         let lo = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         assert!(port_in_use(lo.local_addr().unwrap().port()).is_some());
         for any in ["0.0.0.0:0", "[::]:0"] {
