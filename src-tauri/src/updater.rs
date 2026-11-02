@@ -143,8 +143,10 @@ pub async fn check(state: &Shared, manual: bool) {
         Ok(u) => u.check().await.map_err(|e| e.to_string()),
         Err(e) => Err(e),
     };
+    let current = state.app.package_info().version.to_string();
     let update = match found {
         Ok(None) => {
+            log(state, &format!("Checked for updates: up to date ({current})"));
             state.updates.set(|s| {
                 s.status = UpdateStatus::UpToDate;
                 s.version = None;
@@ -157,7 +159,7 @@ pub async fn check(state: &Shared, manual: bool) {
         Ok(Some(u)) => u,
         Err(e) => return fail(e),
     };
-    log(state, &format!("Downloading Tunnel Bar {}", update.version));
+    log(state, &format!("Checked for updates: {} available (running {current}); downloading", update.version));
     state.updates.set(|s| {
         s.status = UpdateStatus::Downloading;
         s.version = Some(update.version.clone());

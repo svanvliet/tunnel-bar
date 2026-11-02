@@ -80,7 +80,7 @@ See [docs/phase3-ui-hooks.md](docs/phase3-ui-hooks.md) for the commands and fiel
 
 ### Updates
 
-Tunnel Bar checks GitHub Releases at launch and every few hours, downloads a new version in the background and verifies its signature. It never restarts on its own: when the update is ready, a banner explains that restarting drops active connections and hosts, such as open SSH sessions. Choose **Restart to update** or **Later**; Later leaves an "Update ready" pill in the footer. Connections and hosts that were running, plus auto-connect and auto-host tunnels, come back after the restart. Settings shows the current version and a **Check for updates** button. Development builds don't update.
+Tunnel Bar checks GitHub Releases at launch and every few hours, downloads a new version in the background and verifies its signature. It never restarts on its own: when the update is ready, a banner explains that restarting drops active connections and hosts, such as open SSH sessions. Choose **Restart to update** or **Later**; Later leaves an "Update ready" pill in the footer. Connections and hosts that were running, plus auto-connect and auto-host tunnels, come back after the restart. Settings shows the current version and a **Check for updates** button. Each check's result is written to the app log (`_app.log` in the logs folder), e.g. "Checked for updates: up to date (0.4.0)". Development builds don't update.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/screenshots/update-ready-dark.png">

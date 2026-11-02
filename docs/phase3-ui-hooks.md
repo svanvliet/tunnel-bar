@@ -169,7 +169,7 @@ By default the service rewrites `Host` to `localhost` and `Origin` to `http(s):/
   - `{kind:"succeeded", message}`
   - `{kind:"failed", message}`
 - `hotkeyError: string | null`: set when the startup registration failed, for example because another app owns the shortcut.
-- `update: UpdateState`: `{status, currentVersion, enabled, version, notes, progress, lastChecked, error}`. `status` is one of `idle`, `checking`, `upToDate`, `downloading`, `ready`, `installing` or `error`. `enabled` is false in development builds. Background check failures are only logged; `error` is set for manual checks and failed installs.
+- `update: UpdateState`: `{status, currentVersion, enabled, version, notes, progress, lastChecked, error}`. `status` is one of `idle`, `checking`, `upToDate`, `downloading`, `ready`, `installing` or `error`. `enabled` is false in development builds. Every check's result (up to date, update found, or failure) is logged to `_app`; background failures are only logged; `error` is set for manual checks and failed installs.
 
 ## UI notes
 
