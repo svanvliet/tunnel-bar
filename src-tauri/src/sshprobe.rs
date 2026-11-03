@@ -13,6 +13,9 @@ const READ_TIMEOUT: Duration = Duration::from_millis(1500);
 const MAX_BANNER: usize = 64;
 /// Inconclusive probes (no reply, refused) are retried after this long; the host may not be up yet.
 const RETRY_AFTER: Duration = Duration::from_secs(60);
+/// A new forward is probed only after this long. `devtunnel connect` binds the local port before the host
+/// port is announced, and a connection in that window makes its forwarder stop accepting for good.
+const FIRST_PROBE_DELAY: Duration = Duration::from_secs(10);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Banner {
@@ -59,7 +62,8 @@ pub fn probe(port: u16) -> Banner {
 
 #[derive(Debug, Clone, Copy)]
 enum Entry {
-    Pending,
+    /// Probe started at this instant (identifies the probe thread that owns the entry).
+    Pending(Instant),
     Done { banner: Banner, at: Instant },
 }
 
@@ -71,12 +75,19 @@ pub type OnChange = Arc<dyn Fn() + Send + Sync>;
 pub struct SshProbes {
     entries: Arc<Mutex<HashMap<Key, Entry>>>,
     on_change: OnChange,
+    first_delay: Duration,
 }
 
 impl SshProbes {
     /// `on_change` runs (on the probe thread) when a probe finds an SSH server.
     pub fn new(on_change: OnChange) -> Self {
-        SshProbes { entries: Default::default(), on_change }
+        SshProbes { entries: Default::default(), on_change, first_delay: FIRST_PROBE_DELAY }
+    }
+
+    #[cfg(test)]
+    fn with_first_delay(mut self, d: Duration) -> Self {
+        self.first_delay = d;
+        self
     }
 
     /// Keeps only `active` keys (dropping results for closed forwards) and returns the local ports of
@@ -87,32 +98,40 @@ impl SshProbes {
         entries.retain(|k, _| keep.contains(k));
         let mut out: HashMap<String, Vec<u16>> = HashMap::new();
         for key in active {
-            let start = match entries.get(key) {
-                None => true,
-                Some(Entry::Done { banner: Banner::Silent, at }) => at.elapsed() >= RETRY_AFTER,
+            let (start, delay) = match entries.get(key) {
+                None => (true, self.first_delay),
+                Some(Entry::Done { banner: Banner::Silent, at }) => (at.elapsed() >= RETRY_AFTER, Duration::ZERO),
                 Some(Entry::Done { banner: Banner::Ssh, .. }) => {
                     out.entry(key.0.clone()).or_default().push(key.1);
-                    false
+                    (false, Duration::ZERO)
                 }
-                _ => false,
+                _ => (false, Duration::ZERO),
             };
             if start {
-                entries.insert(key.clone(), Entry::Pending);
-                self.spawn(key.clone());
+                let token = Instant::now();
+                entries.insert(key.clone(), Entry::Pending(token));
+                self.spawn(key.clone(), token, delay);
             }
         }
         out
     }
 
-    fn spawn(&self, key: Key) {
+    fn spawn(&self, key: Key, token: Instant, delay: Duration) {
         let entries = self.entries.clone();
         let on_change = self.on_change.clone();
         let k2 = key.clone();
         let spawned = std::thread::Builder::new().name("ssh-probe".into()).spawn(move || {
+            if !delay.is_zero() {
+                std::thread::sleep(delay);
+                // Closed during the delay: never touch the port.
+                if !matches!(entries.lock().unwrap().get(&key), Some(Entry::Pending(t)) if *t == token) {
+                    return;
+                }
+            }
             let banner = probe(key.1);
             let mut e = entries.lock().unwrap();
             // Dropped while probing (forward closed): discard so a new forward reprobes.
-            if !matches!(e.get(&key), Some(Entry::Pending)) {
+            if !matches!(e.get(&key), Some(Entry::Pending(t)) if *t == token) {
                 return;
             }
             e.insert(key, Entry::Done { banner, at: Instant::now() });
@@ -182,7 +201,8 @@ mod tests {
         let h = hits.clone();
         let probes = SshProbes::new(Arc::new(move || {
             h.fetch_add(1, Ordering::SeqCst);
-        }));
+        }))
+        .with_first_delay(Duration::ZERO);
         let active = vec![("t".to_string(), ssh), ("t".to_string(), http)];
         assert!(probes.sync(&active).is_empty(), "results arrive asynchronously");
         let deadline = Instant::now() + Duration::from_secs(5);
@@ -201,5 +221,27 @@ mod tests {
             std::thread::sleep(Duration::from_millis(20));
         }
         assert_eq!(hits.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn first_probe_waits_and_skips_forwards_closed_meanwhile() {
+        let l = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let port = l.local_addr().unwrap().port();
+        l.set_nonblocking(true).unwrap();
+        let probes = SshProbes::new(Arc::new(|| {})).with_first_delay(Duration::from_millis(400));
+        let key = vec![("t".to_string(), port)];
+        probes.sync(&key);
+        std::thread::sleep(Duration::from_millis(150));
+        assert!(l.accept().is_err(), "probed before the delay");
+        // Closed and reopened during the delay: the first thread must not probe the new forward early.
+        probes.sync(&[]);
+        probes.sync(&key);
+        std::thread::sleep(Duration::from_millis(350));
+        assert!(l.accept().is_err(), "stale probe thread connected");
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while l.accept().is_err() {
+            assert!(Instant::now() < deadline, "never probed after the delay");
+            std::thread::sleep(Duration::from_millis(20));
+        }
     }
 }

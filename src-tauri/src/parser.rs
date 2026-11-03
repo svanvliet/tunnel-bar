@@ -20,6 +20,10 @@ pub enum CliEvent {
     /// `host`: "Ready to accept connections for tunnel: x.usw3"
     Ready,
     Warning { message: String },
+    /// `connect`: a local forwarder stopped accepting (e.g. "PortForwardingService unexpected error accepting
+    /// connections: … Port 2222 is not being forwarded" when a client connects before the host port is announced).
+    /// The CLI keeps the port bound but never accepts again, so the connection must be restarted.
+    ForwarderFailed { message: String },
 }
 
 static HOSTING: Lazy<Regex> = Lazy::new(|| Regex::new(r"^Hosting port:?\s*(?P<p>\d+)").unwrap());
@@ -66,6 +70,9 @@ pub fn parse_line(raw: &str) -> Option<CliEvent> {
     }
     if let Some(w) = line.strip_prefix("Warning:") {
         return Some(CliEvent::Warning { message: w.trim().to_string() });
+    }
+    if line.contains("unexpected error accepting connections") {
+        return Some(CliEvent::ForwarderFailed { message: line.to_string() });
     }
     if line.contains("tunnel relay restored") {
         return Some(CliEvent::Restored);
@@ -141,5 +148,12 @@ mod tests {
         assert!(matches!(parse_line("Error: Tunnel not found."), Some(CliEvent::Error { .. })));
         assert_eq!(parse_line("SSH: PortForwardingService listening on 127.0.0.1:2223."), None);
         assert_eq!(parse_line("   "), None);
+    }
+
+    #[test]
+    fn detects_failed_forwarder() {
+        let l = "SSH: PortForwardingService unexpected error accepting connections: System.InvalidOperationException: Port 2222 is not being forwarded.";
+        assert!(matches!(parse_line(l), Some(CliEvent::ForwarderFailed { .. })));
+        assert_eq!(parse_line("   at Microsoft.DevTunnels.Ssh.Tcp.LocalPortForwarder.AcceptConnections()"), None);
     }
 }

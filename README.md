@@ -11,10 +11,10 @@ A macOS menu-bar and Windows tray app for managing [Microsoft Dev Tunnels](https
 ### Connecting
 
 - Browse your account's tunnels in **Remote connections** and **Local tunnels**, with host online/offline status.
-- Connect and disconnect, with auto-reconnect using exponential backoff. Stops retrying on auth errors.
+- Connect and disconnect, with auto-reconnect using exponential backoff. Stops retrying on auth errors. If `devtunnel connect` reports that a local port stopped accepting connections ("PortForwardingService unexpected error accepting connections", which happens when a client connects before the host's port is announced), the connection is restarted.
 - Per-tunnel **Auto** connect on launch. It's disabled (setting kept) while this device hosts the tunnel, since connecting would loop back to its own host.
 - Detects `devtunnel connect` and `devtunnel host` processes started outside Tunnel Bar, with **Take over** and **Stop**. An external host gets Take over and Stop on its **Local tunnels** card only. On Windows, a `devtunnel host` started from an admin terminal is still recognised. Stopping it asks for administrator approval (UAC).
-- Shows forwarded ports (`localhost:L → :R`), with Copy SSH (uses your `~/.ssh/config` alias if one matches) and Open SSH (Terminal on macOS, Windows Terminal or cmd on Windows). Open SSH appears for any forwarded port that answers as an SSH server (Tunnel Bar reads the server's `SSH-` greeting without sending anything), as well as for ports 22 and 2222.
+- Shows forwarded ports (`localhost:L → :R`), with Copy SSH (uses your `~/.ssh/config` alias if one matches) and Open SSH (Terminal on macOS, Windows Terminal or cmd on Windows). Open SSH appears for any forwarded port that answers as an SSH server (Tunnel Bar reads the server's `SSH-` greeting without sending anything, 10 seconds after the port appears), as well as for ports 22 and 2222.
 - Recognises tunnels hosted on this device, by Tunnel Bar or another `devtunnel host`. Their **Remote connections** card says **This device** instead of offering Connect. It remembers the last host, so an offline tunnel shows "last hosted here".
 - Optional local nicknames (double-click a tunnel name or open its details).
 - Never orphans connections: stops children on Quit/SIGTERM, and reclaims any left by a crash on next launch. On Windows each child runs in a Job Object, so it dies with Tunnel Bar.

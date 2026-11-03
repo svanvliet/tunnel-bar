@@ -295,15 +295,16 @@ impl Supervisor {
         let mut last_msg = String::new();
         let mut auth = false;
         let mut was_connected = false;
+        let mut failed = false;
 
         let status = loop {
             tokio::select! {
                 l = out.next_line(), if !out_done => match l {
-                    Ok(Some(l)) => self.handle_line(id, generation, "out", &l, &mut last_msg, &mut auth, &mut was_connected),
+                    Ok(Some(l)) => self.handle_line(id, generation, "out", &l, &mut last_msg, &mut auth, &mut was_connected, &mut failed),
                     _ => out_done = true,
                 },
                 l = err.next_line(), if !err_done => match l {
-                    Ok(Some(l)) => self.handle_line(id, generation, "err", &l, &mut last_msg, &mut auth, &mut was_connected),
+                    Ok(Some(l)) => self.handle_line(id, generation, "err", &l, &mut last_msg, &mut auth, &mut was_connected, &mut failed),
                     _ => err_done = true,
                 },
                 s = child.wait() => break s.ok(),
@@ -318,13 +319,18 @@ impl Supervisor {
                 terminate(&mut child, pid).await;
                 break None;
             }
+            if failed {
+                self.log(id, "app", "Local forwarder stopped accepting connections; restarting");
+                terminate(&mut child, pid).await;
+                break None;
+            }
         };
         // Drain whatever is left after exit.
         let drain = async {
             while !out_done || !err_done {
                 tokio::select! {
-                    l = out.next_line(), if !out_done => match l { Ok(Some(l)) => self.handle_line(id, generation, "out", &l, &mut last_msg, &mut auth, &mut was_connected), _ => out_done = true },
-                    l = err.next_line(), if !err_done => match l { Ok(Some(l)) => self.handle_line(id, generation, "err", &l, &mut last_msg, &mut auth, &mut was_connected), _ => err_done = true },
+                    l = out.next_line(), if !out_done => match l { Ok(Some(l)) => self.handle_line(id, generation, "out", &l, &mut last_msg, &mut auth, &mut was_connected, &mut failed), _ => out_done = true },
+                    l = err.next_line(), if !err_done => match l { Ok(Some(l)) => self.handle_line(id, generation, "err", &l, &mut last_msg, &mut auth, &mut was_connected, &mut failed), _ => err_done = true },
                 }
             }
         };
@@ -334,7 +340,8 @@ impl Supervisor {
         }
         let code = status.and_then(|s| s.code()).map(|c| format!("exit code {c}")).unwrap_or_else(|| "terminated".into());
         let message = if last_msg.is_empty() { code } else { format!("{last_msg} ({code})") };
-        RunEnd::Exited { message, auth, was_connected }
+        // A failed forwarder doesn't count as a healthy run, so repeated failures back off instead of looping.
+        RunEnd::Exited { message, auth, was_connected: was_connected && !failed }
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -347,6 +354,7 @@ impl Supervisor {
         last_msg: &mut String,
         auth: &mut bool,
         was_connected: &mut bool,
+        failed: &mut bool,
     ) {
         self.log(id, stream, line);
         let Some(ev) = parse_line(line) else { return };
@@ -384,6 +392,12 @@ impl Supervisor {
             CliEvent::AuthRequired { message } => {
                 *last_msg = message;
                 *auth = true;
+            }
+            CliEvent::ForwarderFailed { message } => {
+                if self.role == Role::Connect {
+                    *last_msg = message;
+                    *failed = true;
+                }
             }
         }
     }
@@ -624,6 +638,34 @@ mod tests {
         let st = wait_for(&s, "t.usw3", |st| matches!(st, ConnState::Backoff { attempt: 2.., .. }));
         if let ConnState::Backoff { message, .. } = st {
             assert!(message.contains("host not available") && message.contains("exit code 3"), "{message}");
+        }
+        s.disconnect("t.usw3");
+        wait_for(&s, "t.usw3", |st| *st == ConnState::Disconnected);
+    }
+
+    #[test]
+    fn failed_forwarder_restarts_with_growing_backoff() {
+        let dir = tempfile::tempdir().unwrap();
+        let f = fixture("connect_ok.txt");
+        let fail = "SSH: PortForwardingService unexpected error accepting connections: System.InvalidOperationException: Port 2222 is not being forwarded.";
+        let cli = fake_cli(
+            dir.path(),
+            &script(
+                &format!("cat '{f}'\necho '{fail}' >&2\nexec sleep 30"),
+                &format!("type \"{f}\"\necho {fail} 1>&2\n{WIN_SLEEP}"),
+            ),
+        );
+        let (s, _) = sup(dir.path());
+        s.connect("t.usw3", cli);
+        // Every run reaches Connected, yet the attempt count keeps growing instead of resetting.
+        let deadline = std::time::Instant::now() + Duration::from_secs(20);
+        loop {
+            if let ConnState::Backoff { attempt: 2.., message, .. } = s.state("t.usw3").0 {
+                assert!(message.contains("not being forwarded"), "{message}");
+                break;
+            }
+            assert!(std::time::Instant::now() < deadline, "no second backoff; state = {:?}", s.state("t.usw3").0);
+            std::thread::sleep(Duration::from_millis(50));
         }
         s.disconnect("t.usw3");
         wait_for(&s, "t.usw3", |st| *st == ConnState::Disconnected);
