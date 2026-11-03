@@ -62,6 +62,8 @@ pub struct AppState {
     pub admin_devtunnel: Mutex<bool>,
     /// When a host on this device was last seen per tunnel (feeds `Settings.hosted_here`).
     local_host_seen: Mutex<HashMap<String, Instant>>,
+    /// Tunnels waiting for a (possibly stale) host count to clear before hosting here.
+    host_waiting: Mutex<HashSet<String>>,
     started: Instant,
     pub updates: crate::updater::Updates,
 }
@@ -161,6 +163,7 @@ impl AppState {
                 hotkey_error: Mutex::new(None),
                 admin_devtunnel: Mutex::new(false),
                 local_host_seen: Mutex::new(HashMap::new()),
+            host_waiting: Mutex::new(HashSet::new()),
                 started: Instant::now(),
                 updates: Default::default(),
                 supervisor,
@@ -615,7 +618,12 @@ impl AppState {
                 if live {
                     seen.insert(id.clone(), now);
                 }
-                let since = now.duration_since(seen.get(id).copied().unwrap_or(self.started));
+                // A pending auto-host/resume retry means the listed host is probably our own stale one.
+                let since = if self.host_waiting.lock().unwrap().contains(id) {
+                    Duration::ZERO
+                } else {
+                    now.duration_since(seen.get(id).copied().unwrap_or(self.started))
+                };
                 let remembered = settings.hosted_here.contains(id);
                 let next = next_hosted_here(remembered, live, s.host_connections > 0, admin_notice, since);
                 if next != remembered {
@@ -1529,10 +1537,48 @@ impl AppState {
             if self.hoster.is_active(&id) {
                 continue;
             }
-            if let Err(e) = self.host(&id).await {
-                self.logs.push(&id, "app", &format!("Auto-host skipped: {e}"));
-            }
+            self.host_or_wait(&id, "Auto-host");
         }
+    }
+
+    /// Hosts `id`, or, if the service still counts a host (often this device's own host from before a
+    /// restart, which the relay keeps listing for a few minutes), re-checks until it clears or `HOST_WAIT` passes.
+    fn host_or_wait(self: &Arc<Self>, id: &str, what: &'static str) {
+        if !self.host_waiting.lock().unwrap().insert(id.to_string()) {
+            return;
+        }
+        let this = self.clone();
+        let id = id.to_string();
+        tauri::async_runtime::spawn(async move {
+            let deadline = Instant::now() + HOST_WAIT;
+            let mut logged = false;
+            let result = loop {
+                if this.hoster.is_active(&id) {
+                    break Ok(());
+                }
+                if let Some(cli) = this.cli_path().await {
+                    let _ = this.reload_summary(&cli, &id).await;
+                }
+                let elsewhere = this.hosted_elsewhere(&id);
+                if !elsewhere || this.external_host_pid(&id).is_some() || Instant::now() >= deadline {
+                    break this.host(&id).await;
+                }
+                if !logged {
+                    logged = true;
+                    this.logs.push(
+                        &id,
+                        "app",
+                        &format!("{what}: the service still lists a host; retrying for up to {} min", HOST_WAIT.as_secs() / 60),
+                    );
+                }
+                tokio::time::sleep(HOST_WAIT_POLL).await;
+            };
+            this.host_waiting.lock().unwrap().remove(&id);
+            if let Err(e) = result {
+                this.logs.push(&id, "app", &format!("{what} skipped: {e}"));
+            }
+            this.publish();
+        });
     }
 
     /// Records running connections and hosts so the next launch restores them after an update restart.
@@ -1565,9 +1611,7 @@ impl AppState {
                 continue;
             }
             self.logs.push(&id, "app", "Hosting again after update");
-            if let Err(e) = self.host(&id).await {
-                self.logs.push(&id, "app", &format!("Couldn't host after update: {e}"));
-            }
+            self.host_or_wait(&id, "Hosting after update");
         }
     }
 
@@ -1702,8 +1746,12 @@ fn should_auto_connect(connected_here: bool, external_client: bool, hosted_here:
 }
 
 /// How long another device must be seen hosting, with no host here, before we forget hosting it.
-/// Covers the service still reporting our own just-stopped host.
-const HOSTED_HERE_GRACE: Duration = Duration::from_secs(60);
+/// Covers the service still reporting our own just-stopped host, which can last several minutes after a restart.
+const HOSTED_HERE_GRACE: Duration = Duration::from_secs(360);
+
+/// How long auto-host and post-update hosting wait for the service's host count to clear, and how often they check.
+const HOST_WAIT: Duration = Duration::from_secs(300);
+const HOST_WAIT_POLL: Duration = Duration::from_secs(15);
 
 /// Whether to remember this device as the tunnel's host. `since_local` is the time since a host was
 /// last seen here (or since launch). An unattributed admin `devtunnel` may be that host, so keep it.

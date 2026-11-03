@@ -231,6 +231,9 @@
         <!-- Connecting to this device's own host only loops back to it. -->
         <span class="hint">Hosted on this device</span>
       {:else}
+        {#if t.hostedHere === "last" && canHost(t)}
+          <button class="primary" disabled={busy || !ready} title="This device hosted this tunnel last" onclick={() => onAction(t, "host")}>Host</button>
+        {/if}
         <button class:primary={t.hostedHere !== "last"} disabled={busy || !ready} title={t.hostedHere === "last" ? "This device hosted this tunnel last" : undefined} onclick={() => onAction(t, "connect")}>Connect</button>
       {/if}
       <span class="spacer"></span>

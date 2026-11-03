@@ -15,7 +15,7 @@ A macOS menu-bar and Windows tray app for managing [Microsoft Dev Tunnels](https
 - Per-tunnel **Auto** connect on launch. It's disabled (setting kept) while this device hosts the tunnel, since connecting would loop back to its own host.
 - Detects `devtunnel connect` and `devtunnel host` processes started outside Tunnel Bar, with **Take over** and **Stop**. An external host gets Take over and Stop on its **Local tunnels** card only. On Windows, a `devtunnel host` started from an admin terminal is still recognised. Stopping it asks for administrator approval (UAC).
 - Shows forwarded ports (`localhost:L → :R`), with Copy SSH (uses your `~/.ssh/config` alias if one matches) and Open SSH (Terminal on macOS, Windows Terminal or cmd on Windows). Open SSH appears for any forwarded port that answers as an SSH server (Tunnel Bar reads the server's `SSH-` greeting without sending anything, 10 seconds after the port appears), as well as for ports 22 and 2222.
-- Recognises tunnels hosted on this device, by Tunnel Bar or another `devtunnel host`. Their **Remote connections** card says **This device** instead of offering Connect. It remembers the last host, so an offline tunnel shows "last hosted here".
+- Recognises tunnels hosted on this device, by Tunnel Bar or another `devtunnel host`. Their **Remote connections** card says **This device** instead of offering Connect. It remembers the last host, so an offline tunnel shows "last hosted here" with a **Host** button.
 - Optional local nicknames (double-click a tunnel name or open its details).
 - Never orphans connections: stops children on Quit/SIGTERM, and reclaims any left by a crash on next launch. On Windows each child runs in a Job Object, so it dies with Tunnel Bar.
 
@@ -94,7 +94,7 @@ See [docs/phase3-ui-hooks.md](docs/phase3-ui-hooks.md) for the commands and fiel
 
 ### Updates
 
-Tunnel Bar checks GitHub Releases at launch and every few hours, downloads a new version in the background and verifies its signature. It never restarts on its own: when the update is ready, a banner explains that restarting drops active connections and hosts, such as open SSH sessions. Choose **Restart to update** or **Later**; Later leaves an "Update ready" pill in the footer. Connections and hosts that were running, plus auto-connect and auto-host tunnels, come back after the restart. Settings shows the current version and a **Check for updates** button. Each check's result is written to the app log (`_app.log` in the logs folder), e.g. "Checked for updates: up to date (0.4.0)". Development builds don't update.
+Tunnel Bar checks GitHub Releases at launch and every few hours, downloads a new version in the background and verifies its signature. It never restarts on its own: when the update is ready, a banner explains that restarting drops active connections and hosts, such as open SSH sessions. Choose **Restart to update** or **Later**; Later leaves an "Update ready" pill in the footer. Connections and hosts that were running, plus auto-connect and auto-host tunnels, come back after the restart. The service can keep listing the old host for a few minutes, so hosting retries every 15 seconds for up to 5 minutes until it clears. Settings shows the current version and a **Check for updates** button. Each check's result is written to the app log (`_app.log` in the logs folder), e.g. "Checked for updates: up to date (0.4.0)". Development builds don't update.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/screenshots/update-ready-dark.png">
