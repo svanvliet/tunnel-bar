@@ -141,7 +141,7 @@ The tray flyout shares the same connection, hosting and management controls, wit
 
 Download the DMG from [Releases](https://github.com/svanvliet/tunnel-bar/releases) and drag Tunnel Bar to Applications. macOS builds are signed with a Developer ID and notarized, so they open without Gatekeeper warnings. After that, Tunnel Bar updates itself (see [Updates](#updates)).
 
-On Windows, download `Tunnel-Bar_<version>_x64-setup.exe` (per-user NSIS) or the `.msi` installer from [Releases](https://github.com/svanvliet/tunnel-bar/releases) and run it. Builds aren't code-signed yet, so SmartScreen may ask you to confirm. Windows doesn't auto-update yet; install new versions from Releases. The manual (`workflow_dispatch`) CI `windows` job uploads both as the `tunnel-bar-windows` artifact.
+On Windows, download `Tunnel-Bar_<version>_x64-setup.exe` (per-user NSIS) or the `.msi` installer from [Releases](https://github.com/svanvliet/tunnel-bar/releases) and run it. Builds aren't Authenticode-signed yet, so SmartScreen may warn about an unrecognised app; choose **More info → Run anyway**. From 0.4.0 on, Tunnel Bar updates itself on Windows too (see [Updates](#updates)): it downloads the signed `-setup.exe` and installs it with a progress-only (passive) installer when you choose **Restart to update**. The manual (`workflow_dispatch`) CI `windows` job uploads both as the `tunnel-bar-windows` artifact.
 
 ## Build
 
@@ -155,7 +155,7 @@ codesign --force --deep -s - src-tauri/target/release/"bundle/macos/Tunnel Bar.a
 
 `package-macos.sh` needs the Developer ID certificate, a `notarytool` keychain profile and the updater signing key; see `AGENTS.md` for the release flow. `SKIP_NOTARIZE=1` skips notarization for local packaging.
 
-On Windows, `npm run tauri build` produces NSIS and MSI installers in `src-tauri/target/release/bundle/{nsis,msi}` (see `src-tauri/tauri.windows.conf.json`).
+On Windows, `npm run tauri build` produces NSIS and MSI installers in `src-tauri/target/release/bundle/{nsis,msi}` (see `src-tauri/tauri.windows.conf.json`). `scripts\package-windows.ps1` builds the release installers with a signed updater artifact and adds the Windows entry to the release's `latest.json`; see `AGENTS.md`.
 
 ### Icon artwork
 
