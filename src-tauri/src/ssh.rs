@@ -96,17 +96,22 @@ fn managed_command(
         if std::fs::read_to_string(&path).ok().as_deref() != Some(source) {
             std::fs::write(&path, source).map_err(|e| e.to_string())?;
         }
-        return Ok(powershell_command(&format!(
-            "& {} -SshArgs @('-p', {}, {})",
-            powershell_quote(&path.to_string_lossy()),
-            powershell_quote(&local_port.to_string()),
-            powershell_quote(alias.unwrap_or("localhost")),
-        )));
+        return Ok(managed_powershell_command(&path, alias, local_port));
     };
     // -p on the command line overrides the alias's Port, so the alias still supplies User, keys, etc.
     #[cfg(unix)]
     Ok([command, vec!["-p".into(), local_port.to_string(), alias.unwrap_or("localhost").to_string()]]
         .concat())
+}
+
+#[cfg(any(windows, test))]
+fn managed_powershell_command(path: &std::path::Path, alias: Option<&str>, local_port: u16) -> Vec<String> {
+    powershell_command(&format!(
+        "& {} -SshArgs @('-p', {}, {}); exit $LASTEXITCODE",
+        powershell_quote(&path.to_string_lossy()),
+        powershell_quote(&local_port.to_string()),
+        powershell_quote(alias.unwrap_or("localhost")),
+    ))
 }
 
 #[cfg(unix)]
@@ -289,6 +294,41 @@ Host *
         assert_eq!(powershell_command("a")[6], "YQA=");
         assert_eq!(powershell_command("ab")[6], "YQBiAA==");
         assert_eq!(powershell_command("abc")[6], "YQBiAGMA");
+    }
+
+    #[test]
+    fn managed_powershell_launcher_preserves_helper_exit_status() {
+        let executable = if cfg!(windows) { "powershell.exe" } else { "pwsh" };
+        match std::process::Command::new(executable).arg("-Version").output() {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound && !cfg!(windows) => {
+                eprintln!("Skipping PowerShell launcher test: pwsh is not installed");
+                return;
+            }
+            result => assert!(result.unwrap().status.success()),
+        }
+        let dir = tempfile::Builder::new().prefix("ssh test ' & ").tempdir_in(".").unwrap();
+        let dir = dir.path().canonicalize().unwrap();
+        let helper = dir.join("ssh-clean.ps1");
+        std::fs::write(
+            &helper,
+            "param([string[]]$SshArgs)\n[IO.File]::WriteAllLines($env:RECORD, $SshArgs)\nexit ([int]$env:SSH_STATUS)\n",
+        )
+        .unwrap();
+        let alias = "devbox ' \" ; $HOME & %PATH%! \\";
+        let cmd = managed_powershell_command(&helper, Some(alias), 2223);
+        for status in [37, 255] {
+            let output = std::process::Command::new(executable)
+                .args(&cmd[1..])
+                .env("RECORD", dir.join("args"))
+                .env("SSH_STATUS", status.to_string())
+                .output()
+                .unwrap();
+            assert_eq!(output.status.code(), Some(status), "{}", String::from_utf8_lossy(&output.stderr));
+            assert_eq!(
+                std::fs::read_to_string(dir.join("args")).unwrap().lines().collect::<Vec<_>>(),
+                vec!["-p", "2223", alias]
+            );
+        }
     }
 
     #[cfg(windows)]
