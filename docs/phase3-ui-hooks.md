@@ -198,6 +198,11 @@ By default the service rewrites `Host` to `localhost` and `Origin` to `http(s):/
   - When a forward has a pin, show and copy `localhost:<pin.localPort>`, not the forward's `localPort`. For example, Copy local URL should use the pinned port.
   - `ssh_command` and `open_ssh` already switch to the pinned port, so callers can keep passing the forward's ports.
   - The pin stays stable across reconnects. A `~/.ssh/config` entry with `Port <pin>` can therefore stay static.
+- **SSH commands**
+  - `ssh_command({id, localPort, remotePort})` now returns `Result<String, String>`: success still resolves to a copyable string; wrapper-generation errors reject the invoke and use the existing "Couldn’t create SSH command" UI error path. `open_ssh` still returns `Result<(), String>`.
+  - Both commands create/update an app-managed helper in the settings `scripts` folder before returning/launching, and share the alias and effective local/pinned port builder. macOS commands contain a shell-quoted absolute `ssh-clean` path. Windows commands use `powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -EncodedCommand <UTF-16LE/base64>`; the encoded script contains the absolute `ssh-clean.ps1` path and argument array, so the same copied command works in cmd and PowerShell without shell expansion.
+  - The helpers pass arguments unchanged to SSH, with command-line `ServerAliveInterval=15` and `ServerAliveCountMax=3` (these override any SSH-config keepalive settings; alias User/key settings remain intact). No reconnect/resume behavior is added.
+  - On success/failure and Ctrl+C, cleanup disables terminal mouse modes 1000/1002/1003/1006, focus reporting 1004 and bracketed paste 2004, resets SGR and shows the cursor. macOS runs `stty sane` only on TTY input and emits escapes only to TTY output; Windows restores the initial console input mode and emits cleanup with VT processing enabled only for console output. SSH exit status is preserved, including on interruption; Unix SSH shares the foreground process group and receives terminal signals directly while the wrapper waits for its status before cleanup. Signals aimed only at the Unix wrapper wait for SSH to finish; force-killing the wrapper or closing the terminal prevents guaranteed cleanup.
 - **Expiration**
   - Valid choices are 1h–30d (for example 1h, 8h, 1d, 7d, 30d).
 - **Creating a tunnel**

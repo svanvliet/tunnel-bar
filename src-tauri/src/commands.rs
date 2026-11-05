@@ -280,10 +280,10 @@ pub fn open_log_dir(app: AppHandle, state: State<'_, Shared>) -> Result<(), Stri
 }
 
 #[tauri::command]
-pub fn ssh_command(state: State<'_, Shared>, id: String, local_port: u16, remote_port: u16) -> String {
+pub fn ssh_command(state: State<'_, Shared>, id: String, local_port: u16, remote_port: u16) -> Result<String, String> {
     let local_port = pinned_or(&state, &id, local_port, remote_port);
     let alias = resolve_alias(&state, &id, local_port, remote_port);
-    ssh::ssh_command(alias.as_deref(), local_port).join(" ")
+    ssh::ssh_command(alias.as_deref(), local_port).map(|cmd| ssh::command_line(&cmd))
 }
 
 /// A pinned local port is stable across reconnects, so SSH should use it over the connect port.
@@ -303,7 +303,7 @@ fn resolve_alias(state: &Shared, id: &str, local_port: u16, remote_port: u16) ->
 pub fn open_ssh(state: State<'_, Shared>, id: String, local_port: u16, remote_port: u16) -> Result<(), String> {
     let local_port = pinned_or(&state, &id, local_port, remote_port);
     let alias = resolve_alias(&state, &id, local_port, remote_port);
-    ssh::open_terminal(&ssh::ssh_command(alias.as_deref(), local_port))
+    ssh::open_terminal(&ssh::ssh_command(alias.as_deref(), local_port)?)
 }
 
 #[tauri::command]
