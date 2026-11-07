@@ -54,7 +54,7 @@ export interface TunnelSummary {
 export interface TunnelView {
   id: string; displayName: string; summary: TunnelSummary; ports: TunnelPort[];
   state: ConnState; forwards: Forward[]; settings: TunnelSettings; orphaned: boolean;
-  hostState: ConnState; hostedPorts: HostedPort[]; anonymous: boolean; createdByApp: boolean; hostedElsewhere: boolean;
+  hostState: ConnState; hostedPorts: HostedPort[]; anonymous: boolean; createdByApp: boolean; exposedHere: boolean; hostedElsewhere: boolean;
   /** "live": this device hosts it now (Tunnel Bar or an external host); "last": it hosted it last. */
   hostedHere?: "no" | "live" | "last";
   /** Local ports of `forwards` whose server answered with an SSH banner (background probe). */

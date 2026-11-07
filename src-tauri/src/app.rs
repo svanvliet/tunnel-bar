@@ -62,8 +62,15 @@ pub struct AppState {
     pub admin_devtunnel: Mutex<bool>,
     /// When a host on this device was last seen per tunnel (feeds `Settings.hosted_here`).
     local_host_seen: Mutex<HashMap<String, Instant>>,
+    /// Connect children found not listening on a reported forward: id -> (pid, consecutive checks).
+    forward_misses: Mutex<HashMap<String, (u32, u32)>>,
     /// Tunnels waiting for a (possibly stale) host count to clear before hosting here.
     host_waiting: Mutex<HashSet<String>>,
+    /// Tunnels auto-connect/auto-host already handled this session, so a wake doesn't undo a manual
+    /// Disconnect or Stop hosting. Cleared on sign-in to restart what an expired sign-in stopped.
+    auto_handled: Mutex<HashSet<(Role, String)>>,
+    /// Set when a refresh sees a sign-in (in the app or Terminal); the refresh then reruns auto-connect.
+    signed_back_in: std::sync::atomic::AtomicBool,
     started: Instant,
     pub updates: crate::updater::Updates,
 }
@@ -93,9 +100,17 @@ pub fn check_delete(p: &DeletePreflight, confirm: bool, allow_hosted_elsewhere: 
         ));
     }
     if p.needs_confirm && !confirm {
-        return Err(format!("{CONFIRM_REQUIRED}This tunnel wasn't created by Tunnel Bar. Confirm to delete it permanently."));
+        return Err(format!("{CONFIRM_REQUIRED}{NOT_OWNED} Confirm to delete it permanently."));
     }
     Ok(())
+}
+
+/// Whether a Tunnel Bar tunnel belongs to this device's hosting. The `tunnelbar` label is account-wide, so
+/// a tunnel exposed on another device is one to connect to here, even while that device's host is offline.
+/// This device owns it if it hosts it now or hosted it last (`Settings.hosted_here`, which `create_tunnel`
+/// seeds), or, for tunnels created before that, has host settings here and no other device is hosting.
+pub fn exposed_here(created_by_app: bool, hosted_here: HostedHere, host_settings_here: bool, hosted_elsewhere: bool) -> bool {
+    created_by_app && (hosted_here != HostedHere::No || (host_settings_here && !hosted_elsewhere))
 }
 
 /// More hosts than the one this Mac runs means another machine hosts the tunnel too.
@@ -103,22 +118,28 @@ pub fn hosted_elsewhere_count(host_connections: u32, hosting_here: bool) -> bool
     host_connections > hosting_here as u32
 }
 
-/// Label changes that would forge or drop Tunnel Bar ownership on a tunnel it didn't create are refused
-/// outright (ownership gates every confirm guard); expiration changes there need `confirm`.
-pub fn check_update(req: &UpdateTunnelRequest, created_by_app: bool, confirm: bool) -> Result<(), String> {
-    if created_by_app {
+/// Adding the Tunnel Bar label to a tunnel it didn't create is refused outright (it would forge
+/// ownership). On a tunnel this device doesn't own (`owned_here`), changing that label or the expiration
+/// needs `confirm`.
+pub fn check_update(req: &UpdateTunnelRequest, created_by_app: bool, owned_here: bool, confirm: bool) -> Result<(), String> {
+    if owned_here {
         return Ok(());
     }
-    if req.add_labels.iter().chain(&req.remove_labels).any(|l| l.eq_ignore_ascii_case(APP_LABEL)) {
+    let label_change = req.add_labels.iter().chain(&req.remove_labels).any(|l| l.eq_ignore_ascii_case(APP_LABEL));
+    if label_change && !created_by_app {
         return Err(format!("The “{APP_LABEL}” label can't be changed on a tunnel Tunnel Bar didn't create."));
     }
-    if req.expiration.is_some() && !confirm {
+    if (label_change || req.expiration.is_some()) && !confirm {
         return Err(format!(
-            "{CONFIRM_REQUIRED}This tunnel wasn't created by Tunnel Bar. Confirm to change its expiration; the service deletes it when it expires."
+            "{CONFIRM_REQUIRED}{NOT_OWNED} Confirm to change its {}.",
+            if label_change { "labels" } else { "expiration; the service deletes it when it expires" }
         ));
     }
     Ok(())
 }
+
+/// Why a change needs confirmation: the tunnel isn't one Tunnel Bar created and exposes on this device.
+const NOT_OWNED: &str = "This tunnel wasn't created by Tunnel Bar on this device.";
 
 /// Error prefixes the UI can match to offer a confirmation and retry with the matching flag.
 pub const CONFIRM_REQUIRED: &str = "CONFIRM_REQUIRED: ";
@@ -163,7 +184,10 @@ impl AppState {
                 hotkey_error: Mutex::new(None),
                 admin_devtunnel: Mutex::new(false),
                 local_host_seen: Mutex::new(HashMap::new()),
+                forward_misses: Mutex::new(HashMap::new()),
             host_waiting: Mutex::new(HashSet::new()),
+                auto_handled: Mutex::new(HashSet::new()),
+                signed_back_in: std::sync::atomic::AtomicBool::new(false),
                 started: Instant::now(),
                 updates: Default::default(),
                 supervisor,
@@ -244,6 +268,8 @@ impl AppState {
                     HostedHere::No
                 };
                 let tunnel_settings = settings.tunnels.get(id).cloned().unwrap_or_default();
+                let created_by_app = summary.as_ref().is_some_and(|s| s.labels.iter().any(|l| l == APP_LABEL));
+                let exposed_here = exposed_here(created_by_app, hosted_here, tunnel_settings.hosts_here(), hosted_elsewhere);
                 let expiration = details
                     .map(|d| d.tunnel_expiration.as_str())
                     .filter(|e| !e.is_empty())
@@ -268,7 +294,8 @@ impl AppState {
                     hosted_ports,
                     hosted_elsewhere,
                     anonymous: details.is_some_and(|d| d.access_control.iter().any(|a| a.allows_anonymous())),
-                    created_by_app: summary.as_ref().is_some_and(|s| s.labels.iter().any(|l| l == APP_LABEL)),
+                    created_by_app,
+                    exposed_here,
                     id: id.clone(),
                     display_name: self.display_name(id, summary.as_ref()),
                     orphaned: summary.is_none(),
@@ -464,6 +491,11 @@ impl AppState {
         }
         self.scan_externals();
         self.publish();
+        if self.signed_back_in.swap(false, std::sync::atomic::Ordering::SeqCst) {
+            // Spawned: auto-connect may wait on a refresh, and this one holds the refresh lock.
+            let me = self.clone();
+            tauri::async_runtime::spawn(async move { me.auto_connect().await });
+        }
     }
 
     async fn refresh_inner(self: &Arc<Self>) -> Result<(), String> {
@@ -490,6 +522,11 @@ impl AppState {
         let next = {
             let mut c = self.cache.lock().unwrap();
             let next = auth::transition(&c.auth_state, &check, was_signed_in, chrono::Local::now());
+            if next == AuthState::SignedIn && matches!(c.auth_state, AuthState::SignedOut | AuthState::Expired) {
+                // Restart what the expired sign-in stopped.
+                self.auto_handled.lock().unwrap().clear();
+                self.signed_back_in.store(true, std::sync::atomic::Ordering::SeqCst);
+            }
             match &check {
                 auth::AuthCheck::SignedIn { message, .. } => c.auth = Some(AuthStatus { logged_in: true, message: message.clone() }),
                 auth::AuthCheck::SignedOut { message } => c.auth = Some(AuthStatus { logged_in: false, message: message.clone() }),
@@ -600,6 +637,42 @@ impl AppState {
             true
         } else {
             listening_changed || notice_changed || remembered_changed
+        }
+    }
+
+    /// Restarts `devtunnel connect` children that are still running but no longer listen on a port they
+    /// reported forwarding (they'd look Connected while every connection is refused). Reads listeners
+    /// instead of connecting, since a test connection would open a relay stream.
+    pub async fn check_forwarders(&self) {
+        let children = self.supervisor.connected_children();
+        // lsof / the TCP table are slow, so keep them off the async loop.
+        let checked = tokio::task::spawn_blocking(move || {
+            children
+                .into_iter()
+                .map(|(id, pid, ports)| {
+                    let listening = external::listen_ports_checked(pid);
+                    (id, pid, ports, listening)
+                })
+                .collect::<Vec<_>>()
+        })
+        .await
+        .unwrap_or_default();
+        let mut misses = self.forward_misses.lock().unwrap();
+        misses.retain(|id, _| checked.iter().any(|(c, _, _, _)| c == id));
+        for (id, pid, ports, listening) in checked {
+            let Some(listening) = listening else { continue };
+            let missing: Vec<u16> = ports.iter().copied().filter(|p| !listening.contains(p)).collect();
+            let (next, restart) = next_forward_miss(misses.get(&id).copied(), pid, !missing.is_empty());
+            match next {
+                Some(n) => misses.insert(id.clone(), n),
+                None => misses.remove(&id),
+            };
+            if restart {
+                let list = missing.iter().map(u16::to_string).collect::<Vec<_>>().join(", ");
+                if self.supervisor.restart_child(&id, pid, &format!("Not listening on forwarded port {list}")) {
+                    misses.remove(&id);
+                }
+            }
         }
     }
 
@@ -814,8 +887,12 @@ impl AppState {
             .map(|(e, _)| e.pid)
     }
 
+    fn hosting_here(&self, id: &str) -> bool {
+        self.hoster.is_active(id) || self.external_host_pid(id).is_some()
+    }
+
     fn hosted_elsewhere(&self, id: &str) -> bool {
-        let here = self.hoster.is_active(id);
+        let here = self.hosting_here(id);
         self.cache.lock().unwrap().summaries.iter().any(|s| s.tunnel_id == id && hosted_elsewhere_count(s.host_connections, here))
     }
 
@@ -926,6 +1003,23 @@ impl AppState {
         self.summary(id).is_some_and(|s| s.labels.iter().any(|l| l == APP_LABEL))
     }
 
+    /// The snapshot's `exposed_here`: Tunnel Bar created this tunnel for this device. Gates the confirm guards.
+    fn owned_here(&self, id: &str) -> bool {
+        let Some(summary) = self.summary(id) else { return false };
+        let created_by_app = summary.labels.iter().any(|l| l == APP_LABEL);
+        let live = self.hosting_here(id);
+        let s = self.settings.lock().unwrap();
+        let hosted_here = if live {
+            HostedHere::Live
+        } else if s.hosted_here.contains(id) {
+            HostedHere::Last
+        } else {
+            HostedHere::No
+        };
+        let host_settings = s.tunnels.get(id).is_some_and(TunnelSettings::hosts_here);
+        exposed_here(created_by_app, hosted_here, host_settings, !live && summary.host_connections > 0)
+    }
+
     /// Creates a tunnel (always labelled `tunnelbar`), adds ports/access, and optionally hosts it.
     pub async fn create_tunnel(self: &Arc<Self>, req: CreateTunnelRequest) -> Result<String, String> {
         if let Some(id) = req.tunnel_id.as_deref().filter(|i| !i.trim().is_empty()) {
@@ -994,17 +1088,17 @@ impl AppState {
             return Err(e);
         }
         let nickname = req.nickname.as_deref().map(str::trim).filter(|n| !n.is_empty());
-        if nickname.is_some() || !port_map.is_empty() {
-            {
-                let mut s = self.settings.lock().unwrap();
-                let t = s.tunnels.entry(id.clone()).or_default();
-                if let Some(n) = nickname {
-                    t.nickname = Some(n.to_string());
-                }
-                t.host_port_map = port_map;
+        {
+            let mut s = self.settings.lock().unwrap();
+            // Created here, so it's this device's to host until another device takes it over.
+            s.hosted_here.insert(id.clone());
+            let t = s.tunnels.entry(id.clone()).or_default();
+            if let Some(n) = nickname {
+                t.nickname = Some(n.to_string());
             }
-            self.save_settings()?;
+            t.host_port_map = port_map;
         }
+        self.save_settings()?;
         self.refresh().await;
         if req.host {
             self.sync_host_maps(Some(&id));
@@ -1036,7 +1130,7 @@ impl AppState {
             *d = d.trim().to_string();
         }
         req.expiration = req.expiration.as_deref().filter(|e| !e.trim().is_empty()).map(normalize_expiration).transpose()?;
-        check_update(&req, self.created_by_app(id), confirm)?;
+        check_update(&req, self.created_by_app(id), self.owned_here(id), confirm)?;
         let cli = self.cli_path().await.ok_or("devtunnel CLI not found")?;
         cli::update(&cli, id, &req).await?;
         self.logs.push(id, "app", "Tunnel properties updated");
@@ -1147,8 +1241,8 @@ impl AppState {
         allow_hosted_elsewhere: bool,
     ) -> Result<(), String> {
         self.check_port_change(id, allow_hosted_elsewhere)?;
-        if !confirm && !self.created_by_app(id) {
-            return Err(format!("{CONFIRM_REQUIRED}This tunnel wasn't created by Tunnel Bar. Confirm to remove port {port}."));
+        if !confirm && !self.owned_here(id) {
+            return Err(format!("{CONFIRM_REQUIRED}{NOT_OWNED} Confirm to remove port {port}."));
         }
         let cli = self.cli_path().await.ok_or("devtunnel CLI not found")?;
         cli::port_delete(&cli, id, port).await?;
@@ -1206,11 +1300,17 @@ impl AppState {
         Ok(())
     }
 
-    /// Access rules gate who can connect, so changing them on a tunnel Tunnel Bar didn't create
-    /// (e.g. the user's dev-box SSH tunnel) needs `confirm`.
+    /// Access rules gate who can connect, so changing them on a tunnel this device doesn't own (e.g. the
+    /// user's dev-box SSH tunnel) or one another machine is hosting needs `confirm`.
     fn check_access_change(&self, id: &str, confirm: bool) -> Result<(), String> {
-        if !confirm && !self.created_by_app(id) {
-            return Err(format!("{CONFIRM_REQUIRED}This tunnel wasn't created by Tunnel Bar. Confirm to change who can connect to it."));
+        if confirm {
+            return Ok(());
+        }
+        if !self.owned_here(id) {
+            return Err(format!("{CONFIRM_REQUIRED}{NOT_OWNED} Confirm to change who can connect to it."));
+        }
+        if self.hosted_elsewhere(id) {
+            return Err(format!("{CONFIRM_REQUIRED}Another machine is hosting this tunnel. Confirm to change who can connect to it."));
         }
         Ok(())
     }
@@ -1315,12 +1415,11 @@ impl AppState {
 
     pub fn delete_preflight(&self, id: &str) -> Result<DeletePreflight, String> {
         let summary = self.summary(id).ok_or("Tunnel not found on this account. Refresh and try again.")?;
-        let created_by_app = summary.labels.iter().any(|l| l == APP_LABEL);
         Ok(DeletePreflight {
-            created_by_app,
-            needs_confirm: !created_by_app,
+            created_by_app: summary.labels.iter().any(|l| l == APP_LABEL),
+            needs_confirm: !self.owned_here(id),
             hosted_elsewhere: self.hosted_elsewhere(id),
-            hosting_here: self.hoster.is_active(id),
+            hosting_here: self.hosting_here(id),
             connected_here: self.supervisor.is_active(id),
         })
     }
@@ -1335,7 +1434,11 @@ impl AppState {
         self.supervisor.disconnect(id);
         self.wait_stopped(id).await;
         cli::delete(&cli, id).await?;
-        self.settings.lock().unwrap().tunnels.remove(id);
+        {
+            let mut s = self.settings.lock().unwrap();
+            s.tunnels.remove(id);
+            s.hosted_here.remove(id);
+        }
         self.save_settings()?;
         self.sync_pins(None);
         self.sync_host_maps(None);
@@ -1444,13 +1547,31 @@ impl AppState {
         self.cancel_login();
     }
 
-    /// Stops an external `devtunnel connect`, or failing that `devtunnel host`, for this tunnel
-    /// (signals only that PID, not its terminal's process group). Returns the role that was stopped.
-    pub async fn stop_external(self: &Arc<Self>, id: &str) -> Result<Role, String> {
-        let (pid, role) = match self.external_pid(id) {
-            Some(p) => (p, Role::Connect),
-            None => (self.external_host_pid(id).ok_or("No external devtunnel process found")?, Role::Host),
+    /// Stops this tunnel's external `devtunnel connect` or `host` (`role`; without one, connect, or failing
+    /// that host), signalling only that PID, not its terminal's process group. Returns the role stopped.
+    pub async fn stop_external(self: &Arc<Self>, id: &str, role: Option<Role>) -> Result<Role, String> {
+        let (pid, role) = match (role, self.external_pid(id)) {
+            (Some(Role::Host), _) | (None, None) => {
+                (self.external_host_pid(id).ok_or("No external devtunnel host found")?, Role::Host)
+            }
+            (_, Some(p)) => (p, Role::Connect),
+            (Some(Role::Connect), None) => return Err("No external devtunnel connection found".into()),
         };
+        // The PID comes from a scan up to 10s old; make sure it's still that devtunnel before signalling it.
+        let tunnel = id.to_string();
+        let still_ours = tauri::async_runtime::spawn_blocking(move || {
+            let scan = external::scan_all(&[]);
+            scan.found.iter().any(|c| c.pid == pid && c.role == role && external::matches_tunnel(&c.tunnel_arg, &tunnel))
+                // A host from an admin terminal: its command line is unreadable, so it was attributed by elimination.
+                || (role == Role::Host && scan.opaque.contains(&pid))
+        })
+        .await
+        .unwrap_or(false);
+        if !still_ours {
+            self.scan_externals();
+            self.publish();
+            return Err("That devtunnel process has already exited.".into());
+        }
         #[cfg(unix)]
         unsafe {
             libc::kill(pid as i32, libc::SIGTERM);
@@ -1506,33 +1627,41 @@ impl AppState {
         Ok(())
     }
 
+    /// Starts Auto connect and Auto host tunnels, each once per session (see `auto_handled`). Tunnels missing
+    /// from the list at launch (e.g. offline) are handled the first time they're listed.
     pub async fn auto_connect(self: &Arc<Self>) {
-        let ids: Vec<String> = {
+        let (connect_ids, host_ids) = {
             let tunnels = self.settings.lock().unwrap().tunnels.clone();
             let c = self.cache.lock().unwrap();
-            c.summaries
-                .iter()
-                .filter(|t| tunnels.get(&t.tunnel_id).is_some_and(|x| x.auto_connect))
-                .map(|t| t.tunnel_id.clone())
-                .collect()
+            let mut handled = self.auto_handled.lock().unwrap();
+            let mut pick = |role: Role, on: fn(&TunnelSettings) -> bool| -> Vec<String> {
+                c.summaries
+                    .iter()
+                    .filter(|t| tunnels.get(&t.tunnel_id).is_some_and(on))
+                    .filter(|t| handled.insert((role, t.tunnel_id.clone())))
+                    .map(|t| t.tunnel_id.clone())
+                    .collect()
+            };
+            (pick(Role::Connect, |t| t.auto_connect), pick(Role::Host, |t| t.auto_host))
         };
-        for id in ids {
-            let hosted_here = self.hoster.is_active(&id) || self.external_host_pid(&id).is_some();
+        // Auto host and post-update hosting (already queued in `host_waiting`) take precedence: connecting
+        // to a tunnel this device is about to host would just loop back here.
+        let will_host = |id: &str| {
+            self.hoster.is_active(id)
+                || self.external_host_pid(id).is_some()
+                || host_ids.iter().any(|h| h == id)
+                || self.host_waiting.lock().unwrap().contains(id)
+        };
+        for id in connect_ids {
+            let hosted_here = will_host(&id);
             if should_auto_connect(self.supervisor.is_active(&id), self.external_pid(&id).is_some(), hosted_here) {
                 let _ = self.connect(&id).await;
             } else if hosted_here {
                 self.logs.push(&id, "app", "Auto-connect skipped: hosted on this device");
+                // Not handled: if hosting here gives up (e.g. another device hosts it), a later pass connects.
+                self.auto_handled.lock().unwrap().remove(&(Role::Connect, id));
             }
         }
-        let host_ids: Vec<String> = {
-            let tunnels = self.settings.lock().unwrap().tunnels.clone();
-            let c = self.cache.lock().unwrap();
-            c.summaries
-                .iter()
-                .filter(|t| tunnels.get(&t.tunnel_id).is_some_and(|x| x.auto_host))
-                .map(|t| t.tunnel_id.clone())
-                .collect()
-        };
         for id in host_ids {
             if self.hoster.is_active(&id) {
                 continue;
@@ -1590,7 +1719,10 @@ impl AppState {
             if let Some(dir) = path.parent() {
                 std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
             }
-            std::fs::write(&path, b).map_err(|e| e.to_string())
+            // Write then rename, so a crash mid-write can't leave a truncated file.
+            let tmp = path.with_extension("json.tmp");
+            std::fs::write(&tmp, b).map_err(|e| e.to_string())?;
+            std::fs::rename(&tmp, &path).map_err(|e| e.to_string())
         });
         if let Err(e) = written {
             self.logs.push("_app", "app", &format!("Couldn't save connections to restore after the update: {e}"));
@@ -1651,8 +1783,9 @@ pub fn start_background(state: Shared) {
                 let _ = state.connect(&id).await;
             }
         }
-        state.auto_connect().await;
+        // Resume first: it queues hosts that auto-connect must not connect to.
         state.resume_after_update().await;
+        state.auto_connect().await;
         let mut last_wall = chrono::Local::now();
         let mut ticks: u64 = 0;
         loop {
@@ -1679,6 +1812,9 @@ pub fn start_background(state: Shared) {
             }
             if ticks.is_multiple_of(2) && state.scan_externals() {
                 state.publish();
+            }
+            if ticks.is_multiple_of(6) {
+                state.check_forwarders().await;
             }
             if ticks.is_multiple_of(12) {
                 state.refresh().await;
@@ -1745,6 +1881,23 @@ fn should_auto_connect(connected_here: bool, external_client: bool, hosted_here:
     !connected_here && !external_client && !hosted_here
 }
 
+/// Consecutive forwarder checks a port must be missing before the child restarts, so a check that lands
+/// while devtunnel rebinds doesn't restart a healthy connection.
+const FORWARD_MISSES_TO_RESTART: u32 = 2;
+
+/// Tracks missed forwarder checks for one tunnel: the next (pid, count) to keep, and whether to restart.
+/// A new pid (the child restarted) starts the count over.
+fn next_forward_miss(prev: Option<(u32, u32)>, pid: u32, missing: bool) -> (Option<(u32, u32)>, bool) {
+    if !missing {
+        return (None, false);
+    }
+    let count = match prev {
+        Some((p, n)) if p == pid => n + 1,
+        _ => 1,
+    };
+    (Some((pid, count)), count >= FORWARD_MISSES_TO_RESTART)
+}
+
 /// How long another device must be seen hosting, with no host here, before we forget hosting it.
 /// Covers the service still reporting our own just-stopped host, which can last several minutes after a restart.
 const HOSTED_HERE_GRACE: Duration = Duration::from_secs(360);
@@ -1768,6 +1921,34 @@ fn next_hosted_here(remembered: bool, live: bool, host_online: bool, admin_notic
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn forwarder_restarts_after_consecutive_misses_on_the_same_child() {
+        assert_eq!(next_forward_miss(None, 7, false), (None, false));
+        let first = next_forward_miss(None, 7, true);
+        assert_eq!(first, (Some((7, 1)), false));
+        assert_eq!(next_forward_miss(first.0, 7, true), (Some((7, 2)), true));
+        // A listener coming back clears the count.
+        assert_eq!(next_forward_miss(first.0, 7, false), (None, false));
+        // A new child starts over.
+        assert_eq!(next_forward_miss(Some((7, 1)), 8, true), (Some((8, 1)), false));
+    }
+
+    #[test]
+    fn exposed_here_needs_evidence_from_this_device() {
+        use HostedHere::*;
+        // Hosted here now or last, even while the service still lists the old host.
+        assert!(exposed_here(true, Live, false, false));
+        assert!(exposed_here(true, Last, false, true));
+        // Exposed on another device: remote here whether its host is online or offline.
+        assert!(!exposed_here(true, No, false, true));
+        assert!(!exposed_here(true, No, false, false));
+        // Older tunnels set up to host here count while no other device hosts them.
+        assert!(exposed_here(true, No, true, false));
+        assert!(!exposed_here(true, No, true, true));
+        // Not Tunnel Bar's.
+        assert!(!exposed_here(false, Live, true, false));
+    }
 
     #[test]
     fn auto_connect_skips_tunnels_hosted_on_this_device() {
@@ -1837,16 +2018,21 @@ mod tests {
         };
         // Forging/dropping ownership on a foreign tunnel is refused even with confirm.
         for r in [req(&["tunnelbar"], &[], None), req(&["TunnelBar"], &[], None), req(&[], &["tunnelbar"], None)] {
-            let e = check_update(&r, false, true).unwrap_err();
+            let e = check_update(&r, false, false, true).unwrap_err();
             assert!(!e.starts_with(CONFIRM_REQUIRED), "{e}");
         }
         // Expiration on a foreign tunnel (e.g. 1h on the dev-box SSH tunnel) needs confirm.
         let exp = req(&[], &[], Some("1h"));
-        assert!(check_update(&exp, false, false).unwrap_err().starts_with(CONFIRM_REQUIRED));
-        assert!(check_update(&exp, false, true).is_ok());
+        assert!(check_update(&exp, false, false, false).unwrap_err().starts_with(CONFIRM_REQUIRED));
+        assert!(check_update(&exp, false, false, true).is_ok());
+        // Another device's Tunnel Bar tunnel: label and expiration changes need confirm.
+        let drop_label = req(&[], &["tunnelbar"], None);
+        assert!(check_update(&drop_label, true, false, false).unwrap_err().starts_with(CONFIRM_REQUIRED));
+        assert!(check_update(&drop_label, true, false, true).is_ok());
+        assert!(check_update(&exp, true, false, false).unwrap_err().starts_with(CONFIRM_REQUIRED));
         // Other edits on foreign tunnels, and anything on our own tunnels, pass.
-        assert!(check_update(&req(&["work"], &["old"], None), false, false).is_ok());
-        assert!(check_update(&req(&[], &["tunnelbar"], Some("1h")), true, false).is_ok());
+        assert!(check_update(&req(&["work"], &["old"], None), false, false, false).is_ok());
+        assert!(check_update(&req(&[], &["tunnelbar"], Some("1h")), true, true, false).is_ok());
     }
 
     #[test]

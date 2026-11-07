@@ -13,8 +13,8 @@ export const autoHostBlocked = (t: TunnelView): string | null =>
   : t.hostedElsewhere ? "Hosted by another device"
   : t.orphaned ? "Tunnel is not on this account"
   : null;
-export const remoteTunnels = (tunnels: TunnelView[]) => tunnels.filter((t) => !t.createdByApp || t.state.kind !== "disconnected");
-export const localTunnels = (tunnels: TunnelView[]) => tunnels.filter((t) => t.createdByApp || hostOn(t));
+export const remoteTunnels = (tunnels: TunnelView[]) => tunnels.filter((t) => !t.exposedHere || t.state.kind !== "disconnected");
+export const localTunnels = (tunnels: TunnelView[]) => tunnels.filter((t) => t.exposedHere || hostOn(t));
 export const isSsh = (f: Forward, t: TunnelView) =>
   !!t.sshPorts?.includes(f.localPort) ||
   f.remotePort === 22 || f.remotePort === 2222 || !!t.settings.sshHost ||

@@ -1,6 +1,8 @@
 import type { Forward, TunnelView } from "./types";
 
 export interface GuardFlags { confirm?: boolean; allowHostedElsewhere?: boolean }
+/** Guard flags plus, for stop_external/adopt_external, which external process the card refers to. */
+export interface ActionFlags extends GuardFlags { role?: "connect" | "host" }
 export interface Guard { kind: "confirm" | "hostedElsewhere"; message: string }
 export type ManagementResult = { ok: true } | { ok: false; guard?: Guard };
 export type ManagementCommand = "update_tunnel" | "add_port" | "remove_port" | "set_port_headers" |

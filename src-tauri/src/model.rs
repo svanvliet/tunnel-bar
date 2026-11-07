@@ -108,7 +108,7 @@ pub struct Forward {
 }
 
 /// Which `devtunnel` subcommand a supervised process runs.
-#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
 #[serde(rename_all = "camelCase")]
 pub enum Role {
     Connect,
@@ -167,6 +167,13 @@ pub struct TunnelSettings {
     /// Hosting: tunnel port -> local server port. While this Mac hosts the tunnel, a loopback proxy on
     /// 127.0.0.1:<tunnel port> forwards to localhost:<local port>. Change via `set_port_map`.
     pub host_port_map: BTreeMap<u16, u16>,
+}
+
+impl TunnelSettings {
+    /// This device is set up to host the tunnel.
+    pub fn hosts_here(&self) -> bool {
+        self.auto_host || !self.host_port_map.is_empty()
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -265,8 +272,11 @@ pub struct TunnelView {
     /// Ports published by our `devtunnel host`, with public URLs.
     pub hosted_ports: Vec<HostedPort>,
     pub anonymous: bool,
-    /// Created by Tunnel Bar's "Expose local port" (label `tunnelbar`).
+    /// Created by Tunnel Bar's "Expose local port" (label `tunnelbar`) on any device.
     pub created_by_app: bool,
+    /// Created by Tunnel Bar and hosted from this device (see `app::exposed_here`), so it's listed for hosting
+    /// rather than connecting.
+    pub exposed_here: bool,
     /// A host other than this app's is connected to the relay.
     pub hosted_elsewhere: bool,
     /// Tunnel lifetime from the service (e.g. "30 days" -> 720); None if unknown.

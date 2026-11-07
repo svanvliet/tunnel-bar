@@ -1,6 +1,6 @@
 [package]
 name = "tunnel-bar"
-version = "0.4.3"
+version = "0.4.4"
 description = "Menu bar manager for Microsoft Dev Tunnels"
 authors = ["Scott Van Vliet"]
 edition = "2024"

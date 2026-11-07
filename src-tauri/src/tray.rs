@@ -70,7 +70,7 @@ fn menu_signature(snap: &Snapshot) -> String {
     let mut sig = snap
         .tunnels
         .iter()
-        .map(|t| format!("{}|{}|{}|{:?}|{}", t.id, t.display_name, state_label(&t.state), t.forwards, state_label(&t.host_state)))
+        .map(|t| format!("{}|{}|{}|{:?}|{}|{}", t.id, t.display_name, state_label(&t.state), t.forwards, state_label(&t.host_state), t.exposed_here))
         .collect::<Vec<_>>()
         .join(";");
     if let Some(v) = ready_update(snap) {
@@ -128,8 +128,8 @@ fn build_menu<R: Runtime>(app: &AppHandle<R>, snap: &Snapshot) -> tauri::Result<
             if ports.is_empty() { String::new() } else { format!("  {ports}") }
         );
         let enabled = !matches!(t.state, ConnState::External { .. });
-        // Tunnels Tunnel Bar exposed are for hosting; clicking toggles the host instead of a client connection.
-        let (action, enabled) = if t.created_by_app {
+        // Tunnels exposed on this device are for hosting; clicking toggles the host instead of a client connection.
+        let (action, enabled) = if t.exposed_here {
             ("hosttoggle", !matches!(t.host_state, ConnState::External { .. }))
         } else {
             ("toggle", enabled)

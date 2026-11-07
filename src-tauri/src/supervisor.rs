@@ -30,6 +30,8 @@ struct Managed {
     generation: u64,
     running: bool,
     pid: Option<u32>,
+    /// Set by `restart_child` to make the running child restart, with the reason to report.
+    restart: Option<String>,
     wake: Arc<Notify>,
 }
 
@@ -42,6 +44,7 @@ impl Managed {
             generation: 0,
             running: false,
             pid: None,
+            restart: None,
             wake: Arc::new(Notify::new()),
         }
     }
@@ -106,6 +109,30 @@ impl Supervisor {
         self.inner.lock().unwrap().values().filter_map(|m| m.pid).collect()
     }
 
+    /// Connected children with the local ports devtunnel reported forwarding: (id, pid, ports).
+    pub fn connected_children(&self) -> Vec<(String, u32, Vec<u16>)> {
+        self.inner
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(_, m)| m.desired && m.state == ConnState::Connected && !m.forwards.is_empty())
+            .filter_map(|(id, m)| Some((id.clone(), m.pid?, m.forwards.iter().map(|f| f.local_port).collect())))
+            .collect()
+    }
+
+    /// Restarts the child for `id` if it's still `pid`, as if it had failed (so repeats back off).
+    pub fn restart_child(&self, id: &str, pid: u32, reason: &str) -> bool {
+        let mut m = self.inner.lock().unwrap();
+        let Some(e) = m.get_mut(id).filter(|e| e.desired && e.pid == Some(pid)) else { return false };
+        e.restart = Some(reason.to_string());
+        e.wake.notify_one();
+        true
+    }
+
+    fn take_restart(&self, id: &str, generation: u64) -> Option<String> {
+        self.inner.lock().unwrap().get_mut(id).filter(|e| e.generation == generation).and_then(|e| e.restart.take())
+    }
+
     pub fn is_active(&self, id: &str) -> bool {
         self.inner.lock().unwrap().get(id).map(|m| m.desired || m.running).unwrap_or(false)
     }
@@ -145,8 +172,11 @@ impl Supervisor {
         let (generation, wake) = {
             let mut m = self.inner.lock().unwrap();
             let e = m.entry(id.to_string()).or_insert_with(Managed::new);
-            if e.desired && e.running {
-                // Already running; a kick skips any pending backoff delay.
+            if e.running {
+                // Already running (or still stopping): keep that run going rather than starting a second
+                // child, which would find the old one still holding the port and bind another. A kick also
+                // skips any pending backoff delay.
+                e.desired = true;
                 e.wake.notify_one();
                 return;
             }
@@ -185,6 +215,13 @@ impl Supervisor {
     }
 
     async fn run_loop(self, id: String, cli: PathBuf, generation: u64, wake: Arc<Notify>) {
+        // `finish` refuses when a connect arrived while stopping; start over then.
+        while !self.run_attempts(&id, &cli, generation, &wake).await {}
+    }
+
+    /// Runs the child until it's no longer wanted; true once the run has finished.
+    async fn run_attempts(&self, id: &str, cli: &PathBuf, generation: u64, wake: &Notify) -> bool {
+        let id = id.to_string();
         let mut attempt: u32 = 0;
         loop {
             if !self.still_wanted(&id, generation) {
@@ -192,7 +229,7 @@ impl Supervisor {
             }
             self.set_state(&id, Some(generation), ConnState::Connecting);
             self.log(&id, "app", &format!("Starting: {} connect {id}", cli.display()));
-            let message = match self.run_child(&id, &cli, generation, &wake).await {
+            let message = match self.run_child(&id, cli, generation, wake).await {
                 RunEnd::Stopped => break,
                 RunEnd::Exited { auth: true, message, .. } => {
                     if let Some(e) = self.inner.lock().unwrap().get_mut(&id).filter(|e| e.generation == generation) {
@@ -200,8 +237,7 @@ impl Supervisor {
                     }
                     self.log(&id, "app", &format!("Authentication required: {message}"));
                     self.set_state(&id, Some(generation), ConnState::AuthRequired { message });
-                    self.finish(&id, generation, false);
-                    return;
+                    return self.finish(&id, generation, false);
                 }
                 RunEnd::Exited { message, was_connected, .. } => {
                     if was_connected {
@@ -223,14 +259,18 @@ impl Supervisor {
                 _ = wake.notified() => {}
             }
         }
-        self.finish(&id, generation, true);
+        self.finish(&id, generation, true)
     }
 
-    fn finish(&self, id: &str, generation: u64, set_disconnected: bool) {
+    /// Marks the run stopped, unless it's wanted again (a connect while it was stopping): then false.
+    fn finish(&self, id: &str, generation: u64, set_disconnected: bool) -> bool {
         let current = {
             let mut m = self.inner.lock().unwrap();
             match m.get_mut(id) {
                 Some(e) if e.generation == generation => {
+                    if e.desired {
+                        return false;
+                    }
                     e.running = false;
                     e.pid = None;
                     true
@@ -245,6 +285,7 @@ impl Supervisor {
             self.log(id, "app", "Disconnected");
             self.set_state(id, Some(generation), ConnState::Disconnected);
         }
+        true
     }
 
     async fn run_child(&self, id: &str, cli: &PathBuf, generation: u64, wake: &Notify) -> RunEnd {
@@ -286,6 +327,7 @@ impl Supervisor {
             let mut m = self.inner.lock().unwrap();
             if let Some(e) = m.get_mut(id) {
                 e.pid = pid;
+                e.restart = None;
             }
         }
         self.persist_pids();
@@ -312,6 +354,13 @@ impl Supervisor {
                     if !self.still_wanted(id, generation) {
                         terminate(&mut child, pid).await;
                         return RunEnd::Stopped;
+                    }
+                    if let Some(reason) = self.take_restart(id, generation) {
+                        self.log(id, "app", &format!("{reason}; restarting"));
+                        last_msg = reason;
+                        terminate(&mut child, pid).await;
+                        failed = true;
+                        break None;
                     }
                 }
             }
@@ -378,6 +427,13 @@ impl Supervisor {
                         .unwrap_or(false)
                 };
                 if self.role == Role::Connect {
+                    if added && local_port != remote_port {
+                        self.log(
+                            id,
+                            "app",
+                            &format!("Port {remote_port} isn't free on this device, so devtunnel forwards it on {local_port}"),
+                        );
+                    }
                     self.set_state(id, Some(generation), ConnState::Connected);
                 }
                 if added {
@@ -667,6 +723,57 @@ mod tests {
             assert!(std::time::Instant::now() < deadline, "no second backoff; state = {:?}", s.state("t.usw3").0);
             std::thread::sleep(Duration::from_millis(50));
         }
+        s.disconnect("t.usw3");
+        wait_for(&s, "t.usw3", |st| *st == ConnState::Disconnected);
+    }
+
+    #[test]
+    fn restart_child_restarts_a_connected_child_that_stopped_listening() {
+        let dir = tempfile::tempdir().unwrap();
+        let f = fixture("connect_ok.txt");
+        // Reports its forwards but never binds them, like a stuck devtunnel.
+        let cli = fake_cli(dir.path(), &script(&format!("cat '{f}'\nexec sleep 30"), &format!("type \"{f}\"\n{WIN_SLEEP}")));
+        let (s, _) = sup(dir.path());
+        s.connect("t.usw3", cli);
+        wait_for(&s, "t.usw3", |st| *st == ConnState::Connected);
+        let children = s.connected_children();
+        let (_, pid, ports) = children.iter().find(|(id, _, _)| id == "t.usw3").expect("connected child").clone();
+        assert!(!ports.is_empty());
+        assert!(!s.restart_child("t.usw3", pid + 1, "stale pid"), "only the current child restarts");
+        assert!(s.restart_child("t.usw3", pid, "Not listening on forwarded port 2222"));
+        let st = wait_for(&s, "t.usw3", |st| matches!(st, ConnState::Backoff { .. }));
+        let ConnState::Backoff { message, .. } = st else { unreachable!() };
+        assert!(message.contains("Not listening"), "{message}");
+        s.disconnect("t.usw3");
+        wait_for(&s, "t.usw3", |st| *st == ConnState::Disconnected);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn reconnect_while_stopping_waits_for_the_old_child() {
+        let dir = tempfile::tempdir().unwrap();
+        let f = fixture("connect_ok.txt");
+        let log = dir.path().join("runs.log");
+        let log = log.display();
+        // Slow to stop, like devtunnel releasing its port: a second child started meanwhile would overlap.
+        let cli = fake_cli(
+            dir.path(),
+            &format!("echo start >> '{log}'\ntrap 'sleep 1; echo end >> '\"'{log}'\"'; exit 0' TERM\ncat '{f}'\nsleep 30 &\nwait"),
+        );
+        let (s, _) = sup(dir.path());
+        s.connect("t.usw3", cli.clone());
+        wait_for(&s, "t.usw3", |st| *st == ConnState::Connected);
+        s.disconnect("t.usw3");
+        std::thread::sleep(Duration::from_millis(200));
+        s.connect("t.usw3", cli);
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while std::fs::read_to_string(dir.path().join("runs.log")).unwrap_or_default().lines().count() < 3 {
+            assert!(std::time::Instant::now() < deadline, "no restart");
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        let runs = std::fs::read_to_string(dir.path().join("runs.log")).unwrap();
+        assert_eq!(runs.lines().take(3).collect::<Vec<_>>(), ["start", "end", "start"]);
+        wait_for(&s, "t.usw3", |st| *st == ConnState::Connected);
         s.disconnect("t.usw3");
         wait_for(&s, "t.usw3", |st| *st == ConnState::Disconnected);
     }

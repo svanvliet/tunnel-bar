@@ -109,7 +109,7 @@
   <div class="detail-id"><span class="hint">Tunnel ID</span><code>{t.id}</code></div>
   {#if pending}
     <div class="confirmation guard-confirmation" bind:this={confirmationBox} role="alert">
-      <strong>{pending.guard.kind === "hostedElsewhere" ? "Another machine is hosting this tunnel" : pending.guard.kind === "confirm" ? "Tunnel Bar didn't create this tunnel" : pending.title + "?"}</strong>
+      <strong>{pending.guard.kind === "hostedElsewhere" ? "Another machine is hosting this tunnel" : pending.guard.kind === "confirm" ? "Confirm this change" : pending.title + "?"}</strong>
       <p>{pending.guard.message}</p>
       {#if pending.guard.kind === "hostedElsewhere"}<p>This can interrupt the other device's host or SSH connection. Approve this remote-host override separately.</p>{/if}
       <div class="button-row"><button bind:this={cancelButton} disabled={busy} onclick={() => (pending = null)}>Cancel</button>

@@ -18,7 +18,7 @@
   import type { Snapshot, TunnelView, LogLine, Forward, HostedPort, TunnelSettings, AccessEntry, AccessRuleRequest, LoginProvider } from "$lib/types";
   import { DEFAULT_HOTKEY, errorKind, stripErrorPrefix } from "$lib/types";
   import { localPort } from "$lib/management";
-  import type { GuardFlags, ManagementResult, ManagementCommand } from "$lib/management";
+  import type { ActionFlags, GuardFlags, ManagementResult, ManagementCommand } from "$lib/management";
   import { remoteTunnels, localTunnels } from "$lib/tunnels";
   import type { TunnelAction } from "$lib/tunnels";
   import { motionDuration } from "$lib/motion";
@@ -208,7 +208,7 @@
     const result = await command<AccessEntry[]>("list_access_rules", { id, ...(port != null ? { port } : {}) }, "Couldn’t load access rules", "rules:" + id);
     return result.ok ? result.value : null;
   }
-  async function action(t: TunnelView, cmd: TunnelAction, allow?: boolean, flags?: GuardFlags): Promise<ManagementResult> {
+  async function action(t: TunnelView, cmd: TunnelAction, allow?: boolean, flags?: ActionFlags): Promise<ManagementResult> {
     const retryable = cmd === "connect" || cmd === "host";
     const titles: Record<TunnelAction, string> = {
       connect: "Couldn’t connect", disconnect: "Couldn’t disconnect", host: "Couldn’t start hosting",

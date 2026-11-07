@@ -8,11 +8,11 @@
   import type { TunnelView, Forward, HostedPort, TunnelSettings } from "./types";
   import { motionDuration } from "./motion";
   import { localPort } from "./management";
-  import type { Guard, GuardFlags, ManagementResult } from "./management";
+  import type { ActionFlags, Guard, GuardFlags, ManagementResult } from "./management";
 
   let { t, role, ready, busy, reduced, copied, onAction, onLogs, onSave, onCopySsh, onCopyAddress, onCopyUrl, onOpenSsh, onOpenUrl, onDetails }: {
     t: TunnelView; role: TunnelRole; ready: boolean; busy: boolean; reduced: boolean; copied: string | null;
-    onAction: (t: TunnelView, action: TunnelAction, allow?: boolean, flags?: GuardFlags) => Promise<ManagementResult>;
+    onAction: (t: TunnelView, action: TunnelAction, allow?: boolean, flags?: ActionFlags) => Promise<ManagementResult>;
     onDetails: (t: TunnelView) => void;
     onLogs: (t: TunnelView) => Promise<void>;
     onSave: (t: TunnelView, patch: Partial<TunnelSettings>) => Promise<boolean>;
@@ -189,7 +189,7 @@
 
   {#if confirmation}
     <div class="confirmation" bind:this={confirmationBox} transition:fade={{ duration: motionDuration(reduced, 160) }}>
-      <strong>{guard?.kind === "hostedElsewhere" ? "Another machine is hosting this tunnel" : guard?.kind === "confirm" ? "Tunnel Bar didn't create this tunnel" : confirmation === "delete" ? "Delete this tunnel?" : "Make this tunnel public?"}</strong>
+      <strong>{guard?.kind === "hostedElsewhere" ? "Another machine is hosting this tunnel" : guard?.kind === "confirm" ? "Confirm this change" : confirmation === "delete" ? "Delete this tunnel?" : "Make this tunnel public?"}</strong>
       <p>{guard ? guard.message + (guard.kind === "hostedElsewhere" ? " This can interrupt the other device’s SSH connection. Confirm the override separately." : "") : confirmation === "delete" ? "This removes it from your account. Its URL stops working." : "Anyone with the URL can connect without signing in. This changes access for every port on this tunnel."}</p>
       <div class="button-row">
         <button bind:this={cancelButton} disabled={busy} onclick={() => { confirmation = null; optionsButton?.focus(); }}>Cancel</button>
@@ -205,8 +205,8 @@
     {#if local}
       {#if t.hostState.kind === "external"}
         <span class="hint">Hosted by another process</span>
-        <button disabled={busy || !ready} title="Stop the external host and host it from Tunnel Bar" onclick={() => onAction(t, "adopt_external")}>Take over</button>
-        <button class="quiet" disabled={busy} onclick={() => onAction(t, "stop_external")}>Stop</button>
+        <button disabled={busy || !ready} title="Stop the external host and host it from Tunnel Bar" onclick={() => onAction(t, "adopt_external", undefined, { role: "host" })}>Take over</button>
+        <button class="quiet" disabled={busy} onclick={() => onAction(t, "stop_external", undefined, { role: "host" })}>Stop</button>
       {:else if managedHost}
         <button disabled={busy} onclick={() => onAction(t, "stop_host")}>Stop hosting</button>
       {:else}
@@ -219,8 +219,8 @@
       </label>
     {:else}
       {#if t.state.kind === "external"}
-        <button disabled={busy || !ready} title="Stop the external process and manage its connection here" onclick={() => onAction(t, "adopt_external")}>Take over</button>
-        <button class="quiet" disabled={busy} onclick={() => onAction(t, "stop_external")}>Stop</button>
+        <button disabled={busy || !ready} title="Stop the external process and manage its connection here" onclick={() => onAction(t, "adopt_external", undefined, { role: "connect" })}>Take over</button>
+        <button class="quiet" disabled={busy} onclick={() => onAction(t, "stop_external", undefined, { role: "connect" })}>Stop</button>
       {:else if isActive(t.state)}
         {@const sshForwards = t.forwards.filter((f) => isSsh(f, t))}
         {#if sshForwards.length === 1}

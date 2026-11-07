@@ -194,15 +194,15 @@ pub fn set_hotkey(app: AppHandle, state: State<'_, Shared>, hotkey: Option<Strin
 }
 
 #[tauri::command]
-pub async fn stop_external(state: State<'_, Shared>, id: String) -> Result<(), String> {
-    state.inner().clone().stop_external(&id).await.map(|_| ())
+pub async fn stop_external(state: State<'_, Shared>, id: String, role: Option<Role>) -> Result<(), String> {
+    state.inner().clone().stop_external(&id, role).await.map(|_| ())
 }
 
 /// Stops an external connection or host and restarts it under Tunnel Bar's management.
 #[tauri::command]
-pub async fn adopt_external(state: State<'_, Shared>, id: String) -> Result<(), String> {
+pub async fn adopt_external(state: State<'_, Shared>, id: String, role: Option<Role>) -> Result<(), String> {
     let s = state.inner().clone();
-    match s.stop_external(&id).await? {
+    match s.stop_external(&id, role).await? {
         Role::Connect => s.connect(&id).await,
         Role::Host => s.host(&id).await,
     }

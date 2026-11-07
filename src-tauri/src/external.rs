@@ -152,11 +152,21 @@ pub fn attribute_opaque(opaque: &[(u32, bool)], candidates: &[String]) -> Attrib
 /// Best-effort list of local TCP listen ports for a process (and its children) via lsof.
 #[cfg(unix)]
 pub fn listen_ports(pid: u32) -> Vec<u16> {
+    listen_ports_checked(pid).unwrap_or_default()
+}
+
+/// Like `listen_ports`, but None when lsof couldn't answer (as opposed to finding no listeners).
+#[cfg(unix)]
+pub fn listen_ports_checked(pid: u32) -> Option<Vec<u16>> {
     let out = std::process::Command::new("/usr/sbin/lsof")
         .args(["-nP", "-a", "-iTCP", "-sTCP:LISTEN", "-g", &pid_group(pid), "-Fn"])
-        .output();
-    let Ok(out) = out else { return vec![] };
-    parse_lsof_ports(&String::from_utf8_lossy(&out.stdout))
+        .output()
+        .ok()?;
+    // lsof exits 1 when nothing matches; an error also prints to stderr.
+    if !out.status.success() && !out.stderr.is_empty() {
+        return None;
+    }
+    Some(parse_lsof_ports(&String::from_utf8_lossy(&out.stdout)))
 }
 
 #[cfg(unix)]
@@ -168,11 +178,19 @@ fn pid_group(pid: u32) -> String {
 /// Local TCP listen ports owned by a process or any of its descendants.
 #[cfg(windows)]
 pub fn listen_ports(pid: u32) -> Vec<u16> {
-    let Ok(mut sys) = System::new() else { return vec![] };
+    listen_ports_checked(pid).unwrap_or_default()
+}
+
+/// Like `listen_ports`, but None when the process or TCP tables couldn't be read (as opposed to no listeners).
+#[cfg(windows)]
+pub fn listen_ports_checked(pid: u32) -> Option<Vec<u16>> {
+    let mut sys = System::new().ok()?;
     sys.refresh_processes_specifics(ProcessesToUpdate::All, true, ProcessRefreshKind::nothing());
     let parents: Vec<(u32, Option<u32>)> =
         sys.processes().iter().map(|(p, pr)| (p.as_u32(), pr.parent().map(|x| x.as_u32()))).collect();
-    ports_owned_by(&crate::win::tcp_listeners(), &descendants(pid, &parents))
+    // A machine always has some listener, so an empty table means the read failed.
+    let listeners = crate::win::tcp_listeners();
+    (!listeners.is_empty()).then(|| ports_owned_by(&listeners, &descendants(pid, &parents)))
 }
 
 /// `root` plus every transitive child, in breadth-first order, given (pid, parent) pairs.
