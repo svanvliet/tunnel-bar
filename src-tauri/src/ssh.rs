@@ -299,7 +299,8 @@ Host *
     #[test]
     fn managed_powershell_launcher_preserves_helper_exit_status() {
         let executable = if cfg!(windows) { "powershell.exe" } else { "pwsh" };
-        match std::process::Command::new(executable).arg("-Version").output() {
+        // Windows PowerShell treats `-Version` as "start version X", so probe with a no-op command.
+        match std::process::Command::new(executable).args(["-NoProfile", "-Command", "exit"]).output() {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound && !cfg!(windows) => {
                 eprintln!("Skipping PowerShell launcher test: pwsh is not installed");
                 return;
