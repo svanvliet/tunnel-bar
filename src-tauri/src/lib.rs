@@ -2,6 +2,8 @@ mod app;
 mod auth;
 mod cli;
 mod commands;
+#[cfg(any(windows, test))]
+mod dpi;
 mod external;
 mod hotkey;
 mod icon;
@@ -71,6 +73,8 @@ pub fn run() {
             }
 
             if let Some(w) = app.get_webview_window("main") {
+                #[cfg(windows)]
+                dpi::initialize(&w);
                 let w2 = w.clone();
                 w.on_window_event(move |e| match e {
                     WindowEvent::Focused(false) if tray::should_hide_on_blur() => tray::hide_window(&w2),
