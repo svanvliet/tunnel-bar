@@ -121,6 +121,8 @@ Follow per-tunnel live logs from tunnel details, with timestamps, highlighted er
 
 The tray flyout shares the same connection, hosting and management controls, with light/dark styling and taskbar-theme-aware tray icons. Open SSH uses Windows Terminal or cmd; supervised CLI children run in Job Objects so they stop when Tunnel Bar exits.
 
+On startup and when a window move changes monitor DPI (or Windows changes the display scale), the flyout restores its configured logical size and neutral page zoom. Windows/WebView2 still apply the monitor's display scaling. This is event-driven: ordinary moves at the same DPI do not resize or reset zoom, and there is no DPI polling.
+
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/screenshots/windows-main-dark.png">
   <img src="docs/screenshots/windows-main-light.png" width="400" alt="Windows tray flyout with a remote SSH connection, a hosted public web port and an inactive private local tunnel">

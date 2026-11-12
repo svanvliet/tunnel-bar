@@ -206,16 +206,13 @@ pub fn show_window(app: &AppHandle) {
 #[cfg(windows)]
 fn position_flyout(app: &AppHandle, w: &tauri::WebviewWindow) {
     let tray_rect = app.tray_by_id(TRAY_ID).and_then(|t| t.rect().ok().flatten());
-    let (Ok(size), Some((tray, monitor))) = (
-        w.outer_size(),
-        tray_rect.and_then(|r| {
-            let scale = w.scale_factor().unwrap_or(1.0);
-            let p = r.position.to_physical::<i32>(scale);
-            let s = r.size.to_physical::<u32>(scale);
-            let m = w.monitor_from_point(p.x as f64 + 1.0, p.y as f64 + 1.0).ok().flatten()?;
-            Some((Rect { x: p.x, y: p.y, w: s.width as i32, h: s.height as i32 }, m))
-        }),
-    ) else {
+    let Some((tray, monitor)) = tray_rect.and_then(|r| {
+        let scale = w.scale_factor().unwrap_or(1.0);
+        let p = r.position.to_physical::<i32>(scale);
+        let s = r.size.to_physical::<u32>(scale);
+        let m = w.monitor_from_point(p.x as f64 + 1.0, p.y as f64 + 1.0).ok().flatten()?;
+        Some((Rect { x: p.x, y: p.y, w: s.width as i32, h: s.height as i32 }, m))
+    }) else {
         let _ = w.move_window(Position::BottomRight);
         return;
     };
@@ -228,26 +225,12 @@ fn position_flyout(app: &AppHandle, w: &tauri::WebviewWindow) {
     let wa = monitor.work_area();
     let work = Rect { x: wa.position.x, y: wa.position.y, w: wa.size.width as i32, h: wa.size.height as i32 };
     let margin = (12.0 * monitor.scale_factor()) as i32;
-    // outer_size is in the DPI of the monitor the window is on now; Windows rescales it on arrival.
-    let predicted = scale_size((size.width, size.height), w.scale_factor().unwrap_or(1.0), monitor.scale_factor());
+    // Predict from the canonical logical size, not a possibly stale physical size.
+    // DPI reconciliation runs after Windows finishes moving/rescaling the window.
+    let size = crate::dpi::logical_size(app).to_physical::<u32>(monitor.scale_factor());
+    let predicted = (size.width as i32, size.height as i32);
     let (x, y) = flyout_position(tray, predicted, mr, work, margin);
     let _ = w.set_position(tauri::PhysicalPosition::new(x, y));
-    // Rounding or a DPI change Windows applied differently: place it again with the size it actually has now.
-    if let Ok(actual) = w.outer_size() {
-        let actual = (actual.width as i32, actual.height as i32);
-        if actual != predicted {
-            let (x, y) = flyout_position(tray, actual, mr, work, margin);
-            let _ = w.set_position(tauri::PhysicalPosition::new(x, y));
-        }
-    }
-}
-
-/// Converts a physical size from one monitor scale factor to another (via logical pixels).
-#[cfg_attr(not(windows), allow(dead_code))]
-fn scale_size(size: (u32, u32), from: f64, to: f64) -> (i32, i32) {
-    let from = if from > 0.0 { from } else { 1.0 };
-    let conv = |v: u32| (v as f64 / from * to).round() as i32;
-    (conv(size.0), conv(size.1))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -357,17 +340,12 @@ mod tests {
 
     #[test]
     fn flyout_size_follows_the_target_monitor_scale() {
-        // 400x580 logical: 600x870 on a 150% monitor becomes 400x580 at 100% and 800x1160 at 200%.
-        assert_eq!(scale_size((600, 870), 1.5, 1.0), (400, 580));
-        assert_eq!(scale_size((600, 870), 1.5, 2.0), (800, 1160));
-        assert_eq!(scale_size((400, 580), 1.0, 1.25), (500, 725));
-        assert_eq!(scale_size((400, 580), 1.0, 1.0), (400, 580));
-        assert_eq!(scale_size((400, 580), 0.0, 2.0), (800, 1160));
         // Using the stale size on a 200% monitor would put the flyout's bottom 580px below where it fits.
         let mon = Rect { x: 1920, y: 0, w: 3840, h: 2160 };
         let work = Rect { x: 1920, y: 0, w: 3840, h: 2064 };
         let tray = Rect { x: 5500, y: 2080, w: 64, h: 64 };
-        let (_, y) = flyout_position(tray, scale_size((400, 580), 1.0, 2.0), mon, work, 24);
+        let size = tauri::LogicalSize::new(400.0, 580.0).to_physical::<u32>(2.0);
+        let (_, y) = flyout_position(tray, (size.width as i32, size.height as i32), mon, work, 24);
         assert_eq!(y + 1160, 2064 - 24);
     }
 }
